@@ -390,8 +390,8 @@ function createPullRequest {
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
 
   local PR_DATA
-  PR_DATA=$(jq -n --arg title "$TITLE" --arg head "$HEAD" --arg base "$BASE" --arg body "$BODY" --arg assignee "$USER" '{
-    title: $title, head: $head, base: $base, body: $body, assignees: [$assignee]
+  PR_DATA=$(jq -n --arg title "$TITLE" --arg head "$HEAD" --arg base "$BASE" --arg body "$BODY" '{
+    title: $title, head: $head, base: $base, body: $body
   }')
 
   local RESPONSE
@@ -405,6 +405,20 @@ function createPullRequest {
 
   if [ -z "$PR_URL" ]; then
     log_error "Failed to create pull request: $(echo "$RESPONSE" | jq -r '.message')"
+    return 1
+  fi
+
+  # Add assignee after creating the PR
+  local ASSIGNEE_DATA
+  ASSIGNEE_DATA=$(jq -n --arg assignee "$USER" '{
+    assignees: [$assignee]
+  }')
+
+  local ASSIGNEE_RESPONSE
+  ASSIGNEE_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$ASSIGNEE_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/assignees")
+
+  if ! echo "$ASSIGNEE_RESPONSE" | grep -q '"login":'; then
+    log_error "Failed to add assignee: $(echo "$ASSIGNEE_RESPONSE" | jq -r '.message')"
     return 1
   fi
 
@@ -916,7 +930,7 @@ function postToGoogleChat {
   local TICKET_URL="$6"
   local TICKET="$7"
   local WEBHOOK_URL
-  WEBHOOK_URL=$(git config --get chat.webhook.url)
+  WEBHOOK_URL="$(git config --get chat.webhook.url)"
 
   if [ -z "$WEBHOOK_URL" ]; then
     log_error "Google Chat webhook URL is not set."
