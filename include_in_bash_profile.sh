@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # Prompts
 DIFF_TO_COMMIT_MSG_PROMPT="Given the following diff, generate a conventional commit message (with type, scope, description, body).
 The title should follow the format '<emoji> <type>(%s): <description>' or ':rotating_light: <type>(%s)!: <description>' for breaking changes.
@@ -1230,7 +1232,7 @@ function cascadeMerge {
           local DTPR_TITLE_NO_EMOJI
           DTPR_TITLE_NO_EMOJI=$(echo "$DTPR_TITLE" | sed 's/^:[^:]*: //')
 
-          if [ "$DTPR_TITLE_NO_EMOJI" == "$PR_TITLE_NO_EMOJI" ]; then
+          if [[ "$DTPR_TITLE_NO_EMOJI" == "$PR_TITLE_NO_EMOJI" ]]; then
             log "Merging corresponding deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
 
             # Check if the deploy/test PR is approved before merging
