@@ -384,6 +384,8 @@ function createPullRequest {
   REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   local USER
   USER=$(safe_curl -s -H "Authorization: token $(git config --get github.token)" https://api.github.com/user | jq -r .login)
+  local ORG
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
   local REPO_NAME
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
 
@@ -393,7 +395,7 @@ function createPullRequest {
   }')
 
   local RESPONSE
-  RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$PR_DATA" "https://api.github.com/repos/$USER/$REPO_NAME/pulls")
+  RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$PR_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/pulls")
   RESPONSE=$(clean_json_response "$RESPONSE")
 
   local PR_URL
@@ -416,7 +418,7 @@ function createPullRequest {
   }')
 
   local REVIEWER_RESPONSE
-  REVIEWER_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$REVIEWER_DATA" "https://api.github.com/repos/$USER/$REPO_NAME/pulls/$PR_NUMBER/requested_reviewers")
+  REVIEWER_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$REVIEWER_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/requested_reviewers")
 
   if ! echo "$REVIEWER_RESPONSE" | grep -q '"login":'; then
     log_error "Failed to add reviewer: $(echo "$REVIEWER_RESPONSE" | jq -r '.message')"
@@ -434,8 +436,8 @@ function checkExistingPullRequest {
   API_KEY=$(git config --get github.token)
   local REPO
   REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
-  local USER
-  USER=$(echo "$REPO" | cut -d '/' -f 1)
+  local ORG
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
   local REPO_NAME
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
 
@@ -445,7 +447,7 @@ function checkExistingPullRequest {
   fi
 
   local RESPONSE
-  RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" "https://api.github.com/repos/$USER/$REPO_NAME/pulls?base=$BASE&head=$USER:$HEAD")
+  RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" "https://api.github.com/repos/$ORG/$REPO_NAME/pulls?base=$BASE&head=$ORG:$HEAD")
 
   RESPONSE=$(clean_json_response "$RESPONSE")
 
@@ -1085,15 +1087,15 @@ function get_pull_requests {
   local BASE_BRANCH=$1
   local API_KEY
   local REPO
-  local USER
+  local ORG
   local REPO_NAME
   local API_URL
 
   API_KEY=$(git config --get github.token)
   REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
-  USER=$(echo "$REPO" | cut -d '/' -f 1)
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
-  API_URL="https://api.github.com/repos/$USER/$REPO_NAME/pulls?base=$BASE_BRANCH&state=open&sort=created&direction=asc"
+  API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls?base=$BASE_BRANCH&state=open&sort=created&direction=asc"
 
   safe_curl -s -H "Authorization: token $API_KEY" "$API_URL"
 }
@@ -1105,16 +1107,16 @@ function merge_pull_request {
   local TRIGGER=$2
   local API_KEY
   local REPO
-  local USER
+  local ORG
   local REPO_NAME
   local API_URL
   local JSON_DATA
 
   API_KEY=$(git config --get github.token)
   REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
-  USER=$(echo "$REPO" | cut -d '/' -f 1)
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
-  API_URL="https://api.github.com/repos/$USER/$REPO_NAME/pulls/$PR_NUMBER/merge"
+  API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/merge"
 
   JSON_DATA=$(jq -n \
     --arg commit_title "Auto-merge PR #$PR_NUMBER triggered by $TRIGGER" \
@@ -1132,7 +1134,7 @@ function is_approved {
   local PR_NUMBER=$1
   local API_KEY
   local REPO
-  local USER
+  local ORG
   local REPO_NAME
   local API_URL
   local REVIEWS
@@ -1140,9 +1142,9 @@ function is_approved {
 
   API_KEY=$(git config --get github.token)
   REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
-  USER=$(echo "$REPO" | cut -d '/' -f 1)
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
-  API_URL="https://api.github.com/repos/$USER/$REPO_NAME/pulls/$PR_NUMBER/reviews"
+  API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/reviews"
   REVIEWS=$(safe_curl -s -H "Authorization: token $API_KEY" "$API_URL")
   APPROVED=$(echo "$REVIEWS" | jq '[.[] | select(.state == "APPROVED")] | length')
 
@@ -1159,15 +1161,15 @@ function post_comment {
   local COMMENT=$2
   local API_KEY
   local REPO
-  local USER
+  local ORG
   local REPO_NAME
   local API_URL
 
   API_KEY=$(git config --get github.token)
   REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
-  USER=$(echo "$REPO" | cut -d '/' -f 1)
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
-  API_URL="https://api.github.com/repos/$USER/$REPO_NAME/issues/$PR_NUMBER/comments"
+  API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/comments"
 
   safe_curl -s -X POST -H "Authorization: token $API_KEY" -H "Content-Type: application/json" \
        -d "{\"body\": \"$COMMENT\"}" "$API_URL" > /dev/null
