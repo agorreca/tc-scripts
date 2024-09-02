@@ -529,6 +529,10 @@ function createCommitAndPRs {
   local COMMIT_BODY
   COMMIT_BODY=$(git log -1 --pretty=format:%b)
 
+  # Replace typographic quotes with straight quotes in the COMMIT_TITLE and COMMIT_BODY
+  COMMIT_TITLE=$(echo "$COMMIT_TITLE" | sed "s/[’‘]/'/g; s/[“”]/\"/g")
+  COMMIT_BODY=$(echo "$COMMIT_BODY" | sed "s/[’‘]/'/g; s/[“”]/\"/g")
+
   log "Checking existing pull requests..."
   local EXISTING_PR_DEVELOP
   EXISTING_PR_DEVELOP=$(checkExistingPullRequest "develop" "$BRANCH")
