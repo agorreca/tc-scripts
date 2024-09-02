@@ -1169,6 +1169,38 @@ function is_approved {
   fi
 }
 
+# Function to approve a pull request
+function approve_pull_request {
+  local PR_NUMBER=$1
+  local API_KEY
+  local REPO
+  local ORG
+  local REPO_NAME
+  local API_URL
+  local JSON_DATA
+
+  API_KEY=$(git config --get github.token)
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  ORG=$(echo "$REPO" | cut -d '/' -f 1)
+  REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
+  API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/reviews"
+
+  JSON_DATA=$(jq -n \
+    --arg event "APPROVE" \
+    '{event: $event}')
+
+  safe_curl -s -X POST -H "Authorization: token $API_KEY" \
+       -H "Content-Type: application/json" \
+       -d "$JSON_DATA" \
+       "$API_URL" > /dev/null
+
+  if [ $? -eq 0 ]; then
+    log_success "Successfully approved PR #$PR_NUMBER"
+  else
+    log_error "Failed to approve PR #$PR_NUMBER"
+  fi
+}
+
 # Function to post a comment on a PR
 function post_comment {
   local PR_NUMBER=$1
@@ -1233,6 +1265,9 @@ function cascadeMerge {
         log_success "Successfully merged PR #$PR_NUMBER: $PR_TITLE"
         post_comment "$PR_NUMBER" ":rocket: This PR was successfully merged via *cascadeMerge* triggered by $TRIGGER."
 
+        # Send notification to Google Chat
+        sendGoogleChatNotification "\u2705 *Develop* branch has been merged. Remember to _pull_ the latest changes!"
+
         # Check for corresponding deploy/test PR with the same title (ignoring the emoji)
         for DTPR in $(echo "$DEPLOY_TEST_PRS" | jq -r '.[] | @base64'); do
           _jq_dt() {
@@ -1278,4 +1313,115 @@ function cascadeMerge {
       log "Skipping PR #$PR_NUMBER: $PR_TITLE (not approved)"
     fi
   done
+}
+
+function sendGoogleChatNotification {
+  local MESSAGE="$1"
+  local WEBHOOK_URL
+  WEBHOOK_URL="$(git config --get chat.webhook.url)"
+
+  if [ -z "$WEBHOOK_URL" ]; then
+    log_error "Google Chat webhook URL is not set."
+    return 1
+  fi
+
+  # Build the message manually without using jq to avoid escaping issues
+  local FORMATTED_MESSAGE
+  FORMATTED_MESSAGE="{
+    \"text\": \"$MESSAGE\"
+  }"
+
+  safe_curl -X POST -H 'Content-Type: application/json' -d "$FORMATTED_MESSAGE" "$WEBHOOK_URL" > /dev/null 2>&1
+
+  if [ $? -eq 0 ]; then
+    log_success "Message sent to Google Chat successfully."
+  else
+    log_error "Failed to send message to Google Chat."
+  fi
+}
+
+function generateChangelog {
+  local CHANGELOG_FILE="CHANGELOG.md"
+
+  # Get the GitHub and Jira URLs from git config
+  local REPO_URL
+  REPO_URL=$(git config --get remote.origin.url | sed -E 's/git@github\.com:/https:\/\/github.com\//; s/\.git$//')
+
+  local JIRA_URL
+  JIRA_URL=$(git config --get jira.url)
+
+  # Start the changelog generation
+  log "Generating changelog..."
+
+  # Create or overwrite the changelog file
+  log "Creating changelog header..."
+  echo "# Changelog" > $CHANGELOG_FILE
+  echo "" >> $CHANGELOG_FILE
+
+  # Extract commit messages in one go, filtering out unwanted commits
+  log "Extracting and processing commit messages..."
+  local COMMIT_LOG
+  COMMIT_LOG=$(git log --pretty=format:"%ad %s %h" --date=short --abbrev-commit | grep -v -e "Auto-merge" -e "UPDATE THIS MESSAGE" -e "Merge branch" -e "Merge pull request")
+
+  local CURRENT_DATE=""
+  local CURRENT_TICKET=""
+  local TEMP_CHANGELOG=""
+
+  # Process the commit log
+  while IFS= read -r line; do
+    local DATE=$(echo "$line" | awk '{print $1}')
+    local MESSAGE=$(echo "$line" | cut -d ' ' -f2-)
+    local TICKET=$(echo "$MESSAGE" | grep -oE "(ATM-[0-9]+)")
+    local COMMIT_HASH=$(echo "$MESSAGE" | awk '{print $NF}')
+    local PR_NUMBER=""
+
+    if [[ "$MESSAGE" =~ \#([0-9]+) ]]; then
+      PR_NUMBER="${BASH_REMATCH[1]}"
+    fi
+
+    # If the date changes, add a new date section
+    if [ "$CURRENT_DATE" != "$DATE" ]; then
+      CURRENT_DATE="$DATE"
+      TEMP_CHANGELOG+="\n## $CURRENT_DATE\n\n"
+      CURRENT_TICKET=""
+    fi
+
+    # If the current ticket changes, add a new ticket section with its Jira title
+    if [ "$CURRENT_TICKET" != "$TICKET" ]; then
+      CURRENT_TICKET="$TICKET"
+      local TICKET_URL="$JIRA_URL/browse/$TICKET"
+      local TICKET_TITLE=$(get_jira_ticket_title "$TICKET")
+      TEMP_CHANGELOG+="- [$CURRENT_TICKET]($TICKET_URL): **$TICKET_TITLE**\n"
+    fi
+
+    # Clean the commit title by removing unnecessary parts
+    local COMMIT_TITLE=$(echo "$MESSAGE" | sed -E "s/ \([a-f0-9]{7}\)$//; s/ #$PR_NUMBER//; s/ $COMMIT_HASH//; s/ \($TICKET\)//")
+
+    # Prepare the commit and PR links
+    local PR_LINK=""
+    if [ -n "$PR_NUMBER" ]; then
+      PR_URL="$REPO_URL/pull/$PR_NUMBER"
+      PR_LINK="[(#$PR_NUMBER)]($PR_URL)"
+    fi
+
+    local COMMIT_LINK=""
+    if [ -n "$COMMIT_HASH" ]; then
+      COMMIT_URL="$REPO_URL/commit/$COMMIT_HASH"
+      COMMIT_LINK="[\`$COMMIT_HASH\`]($COMMIT_URL)"
+    fi
+
+    # Combine the title and links, removing any duplicate PR links
+    local FINAL_COMMIT_MESSAGE="$COMMIT_TITLE $PR_LINK $COMMIT_LINK"
+    FINAL_COMMIT_MESSAGE=$(echo "$FINAL_COMMIT_MESSAGE" | sed -E "s/\(#$PR_NUMBER\) \[\(#$PR_NUMBER\)\]/\[\(#$PR_NUMBER\)\]/")
+
+    # Remove the ticket reference from the final message if it still exists
+    FINAL_COMMIT_MESSAGE=$(echo "$FINAL_COMMIT_MESSAGE" | sed -E "s/\($TICKET\)//")
+
+    TEMP_CHANGELOG+="  - $FINAL_COMMIT_MESSAGE\n"
+  done <<< "$COMMIT_LOG"
+
+  # Write all changes to the changelog file in one go
+  echo -e "$TEMP_CHANGELOG" >> $CHANGELOG_FILE
+
+  log_success "Changelog generated and saved to $CHANGELOG_FILE"
 }
