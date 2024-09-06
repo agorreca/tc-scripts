@@ -1288,21 +1288,29 @@ function cascadeMerge {
           DTPR_TITLE_NO_EMOJI=$(echo "$DTPR_TITLE" | sed 's/^:[^:]*: //')
 
           if [[ "$DTPR_TITLE_NO_EMOJI" == "$PR_TITLE_NO_EMOJI" ]]; then
-            log "Merging corresponding deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
+            log "Checking corresponding deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
 
-            # Check if the deploy/test PR is approved before merging
-            if is_approved "$DTPR_NUMBER"; then
-              merge_pull_request "$DTPR_NUMBER" "$TRIGGER"
+            # Automatically approve the deploy/test PR if not already approved
+            if ! is_approved "$DTPR_NUMBER"; then
+              log "Approving deploy/test PR #$DTPR_NUMBER"
+              approve_pull_request "$DTPR_NUMBER"
 
               if [ $? -eq 0 ]; then
-                log_success "Successfully merged deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
-                post_comment "$DTPR_NUMBER" ":rocket: This PR was successfully merged via *cascadeMerge* triggered by $TRIGGER."
+                log_success "Successfully approved deploy/test PR #$DTPR_NUMBER"
               else
-                log_error "Failed to merge deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
-                post_comment "$DTPR_NUMBER" ":warning: Failed to merge via *cascadeMerge* triggered by $TRIGGER."
+                log_error "Failed to approve deploy/test PR #$DTPR_NUMBER"
               fi
+            fi
+
+            # Merge the deploy/test PR after approval
+            merge_pull_request "$DTPR_NUMBER" "$TRIGGER"
+
+            if [ $? -eq 0 ]; then
+              log_success "Successfully merged deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
+              post_comment "$DTPR_NUMBER" ":rocket: This PR was successfully merged via *cascadeMerge* triggered by $TRIGGER."
             else
-              log "Skipping deploy/test PR #$DTPR_NUMBER: $DTPR_TITLE (not approved)"
+              log_error "Failed to merge deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
+              post_comment "$DTPR_NUMBER" ":warning: Failed to merge via *cascadeMerge* triggered by $TRIGGER."
             fi
           fi
         done
