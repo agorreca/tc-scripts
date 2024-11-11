@@ -1,10 +1,14 @@
 #!/bin/bash
 
+alias smartpush="createCommitAndPRs"
+#alias deploytest="pushToDeployTest"
+#alias deploydevelop="pushToDevelop"
+
 # Prompts
 DIFF_TO_COMMIT_MSG_PROMPT="Given the following diff, generate a conventional commit message (with type, scope, description, body).
 The title should follow the format '<emoji> <type>(%s): <description>' or ':rotating_light: <type>(%s)!: <description>' for breaking changes.
 Write it in simple English and in a markdown formatted text block without using triple backticks, except for the first and last.
-
+|
 Use the appropriate emoji based on the commit type:
 - feat: :sparkles:
 - fix: :bug:
@@ -89,6 +93,12 @@ SUBTASK_PROMPT="Create the task title and a brief description of the task that o
 as if it hasn't been started yet. The task title should be in sentence case.
 Do not mention the diff explicitly. The description should be a single paragraph.
 Do not use simple quotes (single or double) to prevent escaping errors."
+
+# Function to parse comma-separated tickets into an array
+function parse_tickets {
+  IFS=',' read -ra TICKETS <<< "$1"
+  echo "${TICKETS[@]}"
+}
 
 # Function to clean JSON responses
 function clean_json_response {
@@ -204,33 +214,42 @@ function copyComponentsAndStylesToClipboard {
 
   local OUTPUT=""
 
-  log "Finding .tsx and .scss files in ${DIR_PATH}..."
-  while IFS= read -r -d '' TSX_FILE; do
-    local SCSS_FILE="${TSX_FILE%.tsx}.scss"
+  log "Finding .tsx, .ts and .scss files in ${DIR_PATH}..."
+  while IFS= read -r -d '' FILE; do
+    local SCSS_FILE=""
+    local FILE_CONTENT=""
+    local FILE_TYPE=""
 
-    if [ ! -f "$TSX_FILE" ]; then
-      log_warning "TSX file ${TSX_FILE} not found."
+    if [[ "$FILE" == *.tsx ]]; then
+      FILE_TYPE="TSX"
+      SCSS_FILE="${FILE%.tsx}.scss"
+    elif [[ "$FILE" == *.ts ]]; then
+      FILE_TYPE="TS"
+      SCSS_FILE="${FILE%.ts}.scss"
+    fi
+
+    if [ ! -f "$FILE" ]; then
+      log_warning "${FILE_TYPE} file ${FILE} not found."
       continue
     fi
 
-    log "Reading ${TSX_FILE} contents..."
-    local TSX_CONTENT
-    TSX_CONTENT=$(< "$TSX_FILE")
+    log "Reading ${FILE} contents..."
+    FILE_CONTENT=$(< "$FILE")
 
-    local SCSS_CONTENT
-    if [ ! -f "$SCSS_FILE" ]; then
-      log_warning "SCSS file ${SCSS_FILE} not found."
-      SCSS_CONTENT="/* No associated SCSS file found. */"
-    else
-      log "Reading ${SCSS_FILE} contents..."
-      SCSS_CONTENT=$(< "$SCSS_FILE")
-    fi
+#    local SCSS_CONTENT
+#    if [ ! -f "$SCSS_FILE" ]; then
+#      log_warning "SCSS file ${SCSS_FILE} not found for ${FILE_TYPE} file."
+#      SCSS_CONTENT="/* No associated SCSS file found for ${FILE_TYPE} file. */"
+#    else
+#      log "Reading ${SCSS_FILE} contents..."
+#      SCSS_CONTENT=$(< "$SCSS_FILE")
+#    fi
 
-    OUTPUT+="-----\n\n// ${TSX_FILE}\n\n${TSX_CONTENT}\n\n// ${SCSS_FILE}\n\n${SCSS_CONTENT}\n\n-----\n\n"
-  done < <(find "$DIR_PATH" -type f -name "*.tsx" -print0)
+    OUTPUT+="-----\n\n// ${FILE}\n\n${FILE_CONTENT}\n\n// ${SCSS_FILE}\n\n${SCSS_CONTENT}\n\n-----\n\n"
+  done < <(find "$DIR_PATH" -type f \( -name "*.tsx" -o -name "*.ts" \) -print0)
 
   if [ -z "$OUTPUT" ]; then
-    log_error "No .tsx files found in the directory."
+    log_error "No .tsx or .ts files found in the directory."
     return 1
   fi
 
@@ -377,6 +396,7 @@ function createPullRequest {
   local TITLE="$2"
   local BODY="$3"
   local HEAD="$4"
+  local DRAFT_MODE="${5:-false}"
 
   local API_KEY
   API_KEY=$(git config --get github.token)
@@ -390,9 +410,15 @@ function createPullRequest {
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
 
   local PR_DATA
-  PR_DATA=$(jq -n --arg title "$TITLE" --arg head "$HEAD" --arg base "$BASE" --arg body "$BODY" '{
-    title: $title, head: $head, base: $base, body: $body
-  }')
+  if [ "$DRAFT_MODE" = true ]; then
+    PR_DATA=$(jq -n --arg title "$TITLE" --arg head "$HEAD" --arg base "$BASE" --arg body "$BODY" '{
+      title: $title, head: $head, base: $base, body: $body, draft: true
+    }')
+  else
+    PR_DATA=$(jq -n --arg title "$TITLE" --arg head "$HEAD" --arg base "$BASE" --arg body "$BODY" '{
+      title: $title, head: $head, base: $base, body: $body
+    }')
+  fi
 
   local RESPONSE
   RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$PR_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/pulls")
@@ -408,36 +434,36 @@ function createPullRequest {
     return 1
   fi
 
-  # Add assignee after creating the PR
-  local ASSIGNEE_DATA
-  ASSIGNEE_DATA=$(jq -n --arg assignee "$USER" '{
-    assignees: [$assignee]
-  }')
-
-  local ASSIGNEE_RESPONSE
-  ASSIGNEE_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$ASSIGNEE_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/assignees")
-
-  if ! echo "$ASSIGNEE_RESPONSE" | grep -q '"login":'; then
-    log_error "Failed to add assignee: $(echo "$ASSIGNEE_RESPONSE" | jq -r '.message')"
-    return 1
-  fi
-
-  # Get the default reviewer from git config
-  local DEFAULT_REVIEWER
-  DEFAULT_REVIEWER=$(git config --get github.default.reviewer)
-
-  local REVIEWER_DATA
-  REVIEWER_DATA=$(jq -n --arg reviewer "$DEFAULT_REVIEWER" '{
-    reviewers: [$reviewer]
-  }')
-
-  local REVIEWER_RESPONSE
-  REVIEWER_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$REVIEWER_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/requested_reviewers")
-
-  if ! echo "$REVIEWER_RESPONSE" | grep -q '"login":'; then
-    log_error "Failed to add reviewer: $(echo "$REVIEWER_RESPONSE" | jq -r '.message')"
-    return 1
-  fi
+#  # Add assignee after creating the PR
+#  local ASSIGNEE_DATA
+#  ASSIGNEE_DATA=$(jq -n --arg assignee "$USER" '{
+#    assignees: [$assignee]
+#  }')
+#
+#  local ASSIGNEE_RESPONSE
+#  ASSIGNEE_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$ASSIGNEE_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/assignees")
+#
+#  if ! echo "$ASSIGNEE_RESPONSE" | grep -q '"login":'; then
+#    log_error "Failed to add assignee: $(echo "$ASSIGNEE_RESPONSE" | jq -r '.message')"
+#    return 1
+#  fi
+#
+#  # Get the default reviewer from git config
+#  local DEFAULT_REVIEWER
+#  DEFAULT_REVIEWER=$(git config --get github.default.reviewer)
+#
+#  local REVIEWER_DATA
+#  REVIEWER_DATA=$(jq -n --arg reviewer "$DEFAULT_REVIEWER" '{
+#    reviewers: [$reviewer]
+#  }')
+#
+#  local REVIEWER_RESPONSE
+#  REVIEWER_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$REVIEWER_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/requested_reviewers")
+#
+#  if ! echo "$REVIEWER_RESPONSE" | grep -q '"login":'; then
+#    log_error "Failed to add reviewer: $(echo "$REVIEWER_RESPONSE" | jq -r '.message')"
+#    return 1
+#  fi
 
   echo "$PR_URL"
 }
@@ -469,127 +495,438 @@ function checkExistingPullRequest {
 }
 
 function createCommitAndPRs {
+  # Enable strict error handling
+  set -e
+  set -o pipefail
+
+  # Check if a ticket number is provided
   if [ -z "$1" ]; then
     log_error "Please provide a ticket number."
     return 1
   fi
 
+  # Ensure the ticket has the correct prefix
   log "Ensuring ticket prefix..."
   local TICKET
   TICKET=$(ensure_prefix "$1")
+
+  # Validate that the ticket prefix was successful
+  if [ -z "$TICKET" ]; then
+    log_error "Failed to ensure ticket prefix for '$1'."
+    return 1
+  fi
+
   local BRANCH="feature/$TICKET"
   local JIRA_URL
   JIRA_URL=$(git config --get jira.url)
+
+  # Validate JIRA_URL
+  if [ -z "$JIRA_URL" ]; then
+    log_error "JIRA URL not configured in git."
+    return 1
+  fi
+
   local TICKET_URL="$JIRA_URL/browse/$TICKET"
 
+  # Check if there are changes to commit
   if git diff-index --quiet HEAD --; then
     log_warning "No changes to commit."
     return 1
   fi
 
+  # Stash any uncommitted changes
   log "Stashing changes..."
-  git stash
+  git stash save "Stash before creating commit and PRs" || {
+    log_error "Failed to stash changes."
+    return 1
+  }
 
-  log "Updating develop branch..."
-  git checkout develop
-  git pull origin develop
+  # Update the develop branch
+  log "Switching to develop branch..."
+  git checkout develop || {
+    log_error "Failed to checkout develop branch."
+    git stash pop
+    return 1
+  }
 
-  log "Creating feature branch $BRANCH..."
-  git checkout -B "$BRANCH"
+  log "Pulling latest changes from develop..."
+  git pull origin develop || {
+    log_error "Failed to pull latest changes from develop."
+    git checkout -
+    git stash pop
+    return 1
+  }
 
-  log "Popping stashed changes..."
-  git stash pop || true
+  # Create or switch to the feature branch
+  log "Creating or switching to feature branch '$BRANCH'..."
+  git checkout -B "$BRANCH" || {
+    log_error "Failed to create or switch to branch '$BRANCH'."
+    git checkout develop
+    git stash pop
+    return 1
+  }
 
+  # Apply stashed changes
+  log "Applying stashed changes..."
+  git stash pop || log_warning "No stashed changes to apply."
+
+  # Run checks: type-check, linting, formatting, and tests
   log "Running type check, linting, formatting, and tests..."
   if ! run_checks; then
     log_error "Type check, linting, formatting, or tests failed. Aborting."
+    git checkout develop
     return 1
   fi
 
-  log "Staging changes..."
-  git add .
+  # Stage all changes
+  log "Staging all changes..."
+  git add . || {
+    log_error "Failed to stage changes."
+    git checkout develop
+    return 1
+  }
 
+  # Generate commit message
   log "Generating commit message..."
-  diffToCommitMsg "$TICKET"
+  diffToCommitMsg "$TICKET" || {
+    log_error "Failed to generate commit message."
+    git checkout develop
+    return 1
+  }
 
+  # Commit changes
   log "Committing changes..."
-  git commit
+  git commit || {
+    log_error "Failed to commit changes."
+    git checkout develop
+    return 1
+  }
 
-  log "Checking if the remote branch exists..."
-  if git ls-remote --exit-code --heads origin "$BRANCH"; then
-    log "The remote branch exists. Pulling the latest changes..."
-    git pull --rebase origin "$BRANCH"
+  # Amend the commit to unify multiple commits into one
+  log "Amending commit to unify multiple commits..."
+  git commit --amend --no-edit || {
+    log_error "Failed to amend commit."
+    git checkout develop
+    return 1
+  }
+
+  # Check if the remote branch exists
+  log "Checking if remote branch '$BRANCH' exists..."
+  if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+    log "Remote branch exists. Pulling latest changes via merge..."
+    git pull origin "$BRANCH" || {
+      log_error "Failed to pull latest changes from remote branch '$BRANCH'."
+      git checkout develop
+      return 1
+    }
+  else
+    log "Remote branch does not exist. It will be created."
   fi
 
-  log "Pushing feature branch to remote..."
-  git push -u origin "$BRANCH"
+  # Push the feature branch to remote
+  if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+    log "Pushing feature branch '$BRANCH' to remote with --force-with-lease..."
+    git push -u origin "$BRANCH" --force-with-lease || {
+      log_error "Failed to push feature branch '$BRANCH' to remote."
+      git checkout develop
+      return 1
+    }
+  else
+    log "Pushing new feature branch '$BRANCH' to remote..."
+    git push -u origin "$BRANCH" || {
+      log_error "Failed to push new feature branch '$BRANCH' to remote."
+      git checkout develop
+      return 1
+    }
+  fi
 
+  # Get the latest commit title and body
   local COMMIT_TITLE
   COMMIT_TITLE=$(git log -1 --pretty=format:%s | sed 's/^:[^ ]* //')
+
   local COMMIT_BODY
   COMMIT_BODY=$(git log -1 --pretty=format:%b)
 
-  # Replace typographic quotes with straight quotes in the COMMIT_TITLE and COMMIT_BODY
+  # Replace typographic quotes with straight quotes in the commit title and body
   COMMIT_TITLE=$(echo "$COMMIT_TITLE" | sed "s/[’‘]/'/g; s/[“”]/\"/g")
   COMMIT_BODY=$(echo "$COMMIT_BODY" | sed "s/[’‘]/'/g; s/[“”]/\"/g")
 
-  log "Checking existing pull requests..."
+  # Delete the local deploy/test branch if it exists
+  log "Deleting local deploy/test branch if it exists..."
+  git branch -D deploy/test >/dev/null 2>&1 || log_warning "Local deploy/test branch does not exist."
+
+  # Checkout the deploy/test branch from remote
+  log "Checking out deploy/test branch..."
+  if ! git checkout deploy/test; then
+    log_error "deploy/test branch does not exist remotely."
+    git checkout develop
+    return 1
+  fi
+
+  log "Fetching latest changes for deploy/test..."
+  git fetch origin deploy/test || {
+    log_error "Failed to fetch latest changes for deploy/test."
+    git checkout develop
+    return 1
+  }
+
+  # Merge feature branch into deploy/test
+  log "Merging feature branch '$BRANCH' into deploy/test..."
+  if ! git merge "$BRANCH" --no-ff -m "Merge $BRANCH into deploy/test"; then
+    log_warning "Merge conflicts detected. Attempting to resolve by preferring 'theirs'."
+
+    # Attempt to resolve conflicts by preferring feature branch changes
+    if git merge "$BRANCH" --strategy-option theirs --no-ff -m "Merge $BRANCH into deploy/test"; then
+      log_success "Conflicts resolved automatically by preferring 'theirs'."
+    else
+      log_error "Automatic conflict resolution failed. Please resolve conflicts manually."
+      git checkout develop
+      return 1
+    fi
+  fi
+
+  # Amend the merge commit to unify commits
+  log "Amending merge commit to unify commits..."
+  git commit --amend --no-edit || {
+    log_error "Failed to amend merge commit."
+    git checkout develop
+    return 1
+  }
+
+  # Push the updated deploy/test branch to remote
+  log "Pushing updated deploy/test branch to remote with --force-with-lease..."
+  git push origin deploy/test --force-with-lease || {
+    log_error "Failed to push updated deploy/test branch to remote."
+    git checkout develop
+    return 1
+  }
+
+  # Create Pull Request to develop in draft mode
+  log "Creating draft Pull Request to develop branch..."
+
+  # Check if a PR already exists for develop
   local EXISTING_PR_DEVELOP
   EXISTING_PR_DEVELOP=$(checkExistingPullRequest "develop" "$BRANCH")
-  local EXISTING_PR_TEST
-  EXISTING_PR_TEST=$(checkExistingPullRequest "deploy/test" "$BRANCH")
 
-  local MESSAGE_TYPE="created"
   local PR_URL_DEVELOP
-  local PR_URL_TEST
-
   if [ "$(echo "$EXISTING_PR_DEVELOP" | jq '. | length')" -gt 0 ]; then
-    log "Existing pull request for develop found. Skipping creation."
+    log "An existing Pull Request to develop was found. Using existing PR."
     PR_URL_DEVELOP=$(echo "$EXISTING_PR_DEVELOP" | jq -r '.[0].html_url')
-    MESSAGE_TYPE="updated"
   else
-    log "Creating pull request for develop..."
+    log "Creating a new draft Pull Request to develop..."
 
+    # Get the Jira ticket title
+    local JIRA_TITLE
+    JIRA_TITLE=$(get_jira_ticket_title "$TICKET") || {
+      log_error "Failed to get Jira ticket title for '$TICKET'."
+      git checkout develop
+      return 1
+    }
+
+    # Construct the PR body
     local PR_BODY
-    PR_BODY=$(echo -e "[Link to Jira ticket]($TICKET_URL)\n\n$COMMIT_BODY" | tr -d '\r')
+    PR_BODY=$(printf "### Jira Tickets\n\n[%s: %s](%s)\n\n### Commits\n\n- %s\n%s\n\n### Proofs\n\n*Please test in the development environment and gather proofs to attach to this PR.*" \
+      "$TICKET" "$JIRA_TITLE" "$TICKET_URL" "$COMMIT_TITLE" "$COMMIT_BODY")
 
-    PR_URL_DEVELOP=$(createPullRequest "develop" ":test_tube: $COMMIT_TITLE" "$PR_BODY" "$BRANCH")
-    if [ -z "$PR_URL_DEVELOP" ]; then return 1; fi
-    log "Pull request for develop created successfully: :test_tube: $COMMIT_TITLE."
+    # Create the Pull Request in draft mode
+    PR_URL_DEVELOP=$(createPullRequest "develop" ":test_tube: $COMMIT_TITLE" "$PR_BODY" "$BRANCH" true) || {
+      log_error "Failed to create draft Pull Request to develop."
+      git checkout develop
+      return 1
+    }
+
+    log "Draft Pull Request to develop created successfully: $PR_URL_DEVELOP."
   fi
 
-  if [ "$(echo "$EXISTING_PR_TEST" | jq '. | length')" -eq 0 ]; then
-    log "No existing pull request for deploy/test found."
-    log "Deleting remote deploy/test branch..."
-    git push origin --delete deploy/test
-
-    log "Recreating remote deploy/test branch from develop..."
-    git checkout develop
-    git push origin develop:refs/heads/deploy/test
-
-    log "Creating pull request for deploy/test..."
-    PR_URL_TEST=$(createPullRequest "deploy/test" ":construction: $COMMIT_TITLE" "$PR_BODY" "$BRANCH")
-    if [ -z "$PR_URL_TEST" ]; then return 1; fi
-    log "Pull request for deploy/test created successfully: :construction: $COMMIT_TITLE."
-  else
-    log "Existing pull request for deploy/test found. Skipping creation."
-    PR_URL_TEST=$(echo "$EXISTING_PR_TEST" | jq -r '.[0].html_url')
-    MESSAGE_TYPE="updated"
-  fi
-
-  log "Sending PR details to Google Chat..."
-  postToGoogleChat "$MESSAGE_TYPE" "$PR_URL_TEST" "$PR_URL_DEVELOP" "$COMMIT_TITLE" "$COMMIT_BODY" "$TICKET_URL" "$TICKET"
+  # Send PR details to Google Chat
+  log "Sending Pull Request details to Google Chat..."
+  postToGoogleChat "created" "$PR_URL_DEVELOP" "$COMMIT_TITLE" "$COMMIT_BODY" "$JIRA_URL" "$TICKET" || {
+    log_warning "Failed to send Pull Request details to Google Chat."
+  }
 
   log_success "Commit and PRs created/updated successfully for $TICKET."
 
-  # Mark ticket as In Progress and assign it to the user
-  transitionJiraTicket "$TICKET"
-  autoassignJiraTicket "$TICKET"
+  # Update Jira ticket: transition and assign
+  log "Updating Jira ticket '$TICKET'..."
+  transitionJiraTicket "$TICKET" || log_warning "Failed to transition Jira ticket '$TICKET'."
+  autoassignJiraTicket "$TICKET" || log_warning "Failed to assign Jira ticket '$TICKET'."
 
+  # Add a comment to the Jira ticket
   log "Adding comment to Jira ticket..."
-  addJiraComment "$TICKET" "$COMMIT_TITLE" "$COMMIT_BODY" "$PR_URL_DEVELOP" "$PR_URL_TEST"
+  addJiraComment "$TICKET" "$COMMIT_TITLE" "$COMMIT_BODY" "$PR_URL_DEVELOP" || log_warning "Failed to add comment to Jira ticket."
 
-  git checkout develop
+  # Switch back to the develop branch
+  log "Switching back to develop branch..."
+  git checkout develop || {
+    log_error "Failed to switch back to develop branch."
+    return 1
+  }
+
+  log_success "Operation completed successfully for ticket '$TICKET'."
+}
+
+# General function to sync a release branch with any target branch
+function syncReleaseWith {
+  local RELEASE_BRANCH="$1"
+  local TARGET_BRANCH="$2"
+  local SYNC_BRANCH="sync-${RELEASE_BRANCH}-with-${TARGET_BRANCH}"
+
+  # Check if the release branch is provided
+  if [ -z "$RELEASE_BRANCH" ]; then
+    log_error "Please provide a release branch name as the first parameter."
+    echo "Usage: syncReleaseWith <release-branch> <target-branch>"
+    return 1
+  fi
+
+  # Check if the target branch is provided
+  if [ -z "$TARGET_BRANCH" ]; then
+    log_error "Please provide a target branch name as the second parameter."
+    echo "Usage: syncReleaseWith <release-branch> <target-branch>"
+    return 1
+  fi
+
+  # Validate if the release branch exists
+  if ! git show-ref --verify --quiet "refs/heads/$RELEASE_BRANCH"; then
+    log_error "The release branch '$RELEASE_BRANCH' does not exist."
+    return 1
+  fi
+
+  # Validate if the target branch exists
+  if ! git show-ref --verify --quiet "refs/heads/$TARGET_BRANCH"; then
+    log_error "The target branch '$TARGET_BRANCH' does not exist."
+    return 1
+  fi
+
+  # 1. Switch to the release branch and update it
+  log "Switching to branch '$RELEASE_BRANCH' and updating it..."
+  git checkout "$RELEASE_BRANCH" || { log_error "Failed to switch to branch '$RELEASE_BRANCH'."; return 1; }
+  git pull origin "$RELEASE_BRANCH" || { log_error "Failed to update branch '$RELEASE_BRANCH'."; return 1; }
+
+  # 2. Create or switch to the synchronization branch
+  if git show-ref --quiet refs/heads/"$SYNC_BRANCH"; then
+    log "Synchronization branch '$SYNC_BRANCH' already exists locally. Switching to it..."
+    git checkout "$SYNC_BRANCH" || { log_error "Failed to switch to branch '$SYNC_BRANCH'."; return 1; }
+    # Check if the remote sync branch exists
+    if git ls-remote --exit-code --heads origin "$SYNC_BRANCH" > /dev/null 2>&1; then
+      git pull origin "$SYNC_BRANCH" || { log_error "Failed to update branch '$SYNC_BRANCH'."; return 1; }
+    else
+      log "Remote synchronization branch '$SYNC_BRANCH' does not exist. It will be pushed later."
+    fi
+  else
+    log "Creating synchronization branch '$SYNC_BRANCH' from '$RELEASE_BRANCH'..."
+    git checkout -b "$SYNC_BRANCH" || { log_error "Failed to create branch '$SYNC_BRANCH'."; return 1; }
+  fi
+
+  # 3. Merge the target branch into the synchronization branch
+  log "Merging '$TARGET_BRANCH' into '$SYNC_BRANCH'..."
+  if git merge "$TARGET_BRANCH" --no-ff -m "Merge $TARGET_BRANCH into $RELEASE_BRANCH for synchronization"; then
+    log_success "Merge completed successfully without conflicts."
+  else
+    log_error "Conflicts encountered during merge. Resolving 'pom.xml' to keep '$RELEASE_BRANCH' version."
+
+    # Resolve conflicts by keeping 'pom.xml' from release branch
+    git checkout "$RELEASE_BRANCH" -- pom.xml
+    git add pom.xml
+
+    # Continue the merge by committing the resolution
+    git commit --no-edit || { log_error "Failed to commit the resolved 'pom.xml'."; return 1; }
+
+    log_success "Conflicts in 'pom.xml' resolved by keeping '$RELEASE_BRANCH' version."
+  fi
+
+  # 4. Verify the commit history
+  log "Verifying commit history in '$SYNC_BRANCH'..."
+  git log --oneline
+
+  # 5. Push the synchronization branch to remote
+  log "Pushing branch '$SYNC_BRANCH' to remote..."
+  git push origin "$SYNC_BRANCH" || { log_error "Failed to push branch '$SYNC_BRANCH'."; return 1; }
+
+  # 6. Create a Pull Request
+  local PR_TITLE="Sync $TARGET_BRANCH into $RELEASE_BRANCH"
+
+  # Get commit messages for the PR description
+  local COMMIT_MESSAGES
+  COMMIT_MESSAGES=$(git log "$RELEASE_BRANCH".."$SYNC_BRANCH" --pretty=format:"- %s")
+
+  local PR_BODY="This PR synchronizes the \`$TARGET_BRANCH\` branch with \`$RELEASE_BRANCH\`.\n\n**Included Changes:**\n$COMMIT_MESSAGES"
+
+  log "Creating Pull Request with title: \"$PR_TITLE\" and description:\n$PR_BODY"
+
+  local PR_URL
+  PR_URL=$(createPullRequest "$RELEASE_BRANCH" "$PR_TITLE" "$PR_BODY" "$SYNC_BRANCH")
+
+  if [ -z "$PR_URL" ]; then
+    log_error "Failed to create the Pull Request."
+    return 1
+  else
+    log_success "Pull Request created successfully: $PR_URL"
+  fi
+
+  # 7. Switch back to the release branch
+  git checkout "$RELEASE_BRANCH" || { log_error "Failed to switch back to branch '$RELEASE_BRANCH'."; return 1; }
+
+  log_success "Synchronization of '$TARGET_BRANCH' into '$RELEASE_BRANCH' completed successfully."
+}
+
+# Alias function to sync release branch with 'develop'
+function syncReleaseWithDevelop {
+  local RELEASE_BRANCH="$1"
+  syncReleaseWith "$RELEASE_BRANCH" "develop"
+}
+
+# Function to get clipboard content based on the operating system
+get_clipboard_content() {
+  if command -v pbpaste &>/dev/null; then
+    pbpaste  # macOS
+  elif command -v xclip &>/dev/null; then
+    xclip -selection clipboard -o  # Linux with xclip
+  elif command -v powershell.exe &>/dev/null; then
+    powershell.exe Get-Clipboard  # Windows (Git Bash)
+  else
+    echo "Could not access clipboard." >&2
+    return 1
+  fi
+}
+
+# Function to copy content to clipboard based on the operating system
+copy_to_clipboard() {
+  if command -v pbcopy &>/dev/null; then
+    pbcopy  # macOS
+  elif command -v xclip &>/dev/null; then
+    xclip -selection clipboard  # Linux with xclip
+  elif command -v powershell.exe &>/dev/null; then
+    clip.exe  # Windows (Git Bash)
+  else
+    echo "Could not copy to clipboard." >&2
+    return 1
+  fi
+}
+
+# Function to simplify the curl command by keeping only essential headers
+simplify_clipboard_curl() {
+  # Get clipboard content
+  clipboard_content=$(get_clipboard_content)
+
+  # Verify if clipboard content is a curl command
+  if [[ "$clipboard_content" =~ ^curl ]]; then
+    echo "Simplifying the curl command from clipboard..."
+
+    # Define essential headers to keep
+    essential_headers=("authorization" "x-host" "x-platform")
+
+    # Filter essential headers and rebuild the curl command
+    simplified_curl=$(echo "$clipboard_content" | grep -E "$(IFS=\| ; echo "${essential_headers[*]}")|^curl")
+
+    # Remove trailing backslash from the last line, if present
+    simplified_curl=$(echo "$simplified_curl" | sed '$s/\\$//')
+
+    # Copy the simplified command back to the clipboard
+    echo "$simplified_curl" | copy_to_clipboard
+    echo "Simplified curl command has been copied to the clipboard."
+  else
+    echo "Clipboard content is not a curl command." >&2
+  fi
 }
 
 function get_jira_ticket_title {
@@ -731,7 +1068,6 @@ function addJiraComment {
   local PR_TITLE="$2"
   local PR_BODY="$3"
   local PR_URL_DEVELOP="$4"
-  local PR_URL_TEST="$5"
   local API_KEY
   API_KEY=$(git config --get jira.token)
   local JIRA_URL
@@ -744,8 +1080,12 @@ function addJiraComment {
   FORMATTED_PR_BODY=$(echo "$PR_BODY" | sed 's/\\n/\
 /g')
 
+  # Construct the comment body without deploy/test PR
   local COMMENT_BODY
-  COMMENT_BODY=$(jq -n --arg pr_title "$PR_TITLE" --arg pr_body "$FORMATTED_PR_BODY" --arg pr_url_develop "$PR_URL_DEVELOP" --arg pr_url_test "$PR_URL_TEST" '{
+  COMMENT_BODY=$(jq -n --arg pr_title "$PR_TITLE" \
+                           --arg pr_body "$FORMATTED_PR_BODY" \
+                           --arg pr_url_develop "$PR_URL_DEVELOP" \
+                           '{
     type: "doc",
     version: 1,
     content: [
@@ -774,23 +1114,6 @@ function addJiraComment {
                 type: "link",
                 attrs: {
                   href: $pr_url_develop
-                }
-              }
-            ]
-          }
-        ]
-      },
-      {
-        type: "paragraph",
-        content: [
-          {
-            type: "text",
-            text: "Deploy/Test Pull Request",
-            marks: [
-              {
-                type: "link",
-                attrs: {
-                  href: $pr_url_test
                 }
               }
             ]
@@ -856,14 +1179,6 @@ function autoassignJiraTicket {
   fi
 }
 
-function log_success {
-  echo -e "\033[1;32m$1\033[0m"
-}
-
-function log_error {
-  echo -e "\033[1;31m$1\033[0m"
-}
-
 function createSubTaskFromDiff {
   if [ -z "$1" ]; then
     log_error "Please provide a parent ticket number."
@@ -927,12 +1242,11 @@ function createSubTaskFromDiff {
 
 function postToGoogleChat {
   local MESSAGE_TYPE="$1"
-  local URL_TEST="$2"
-  local URL_DEVELOP="$3"
-  local TITLE="$4"
-  local DESCRIPTION="$5"
-  local TICKET_URL="$6"
-  local TICKET="$7"
+  local URL_DEVELOP="$2"
+  local TITLE="$3"
+  local DESCRIPTION="$4"
+  local TICKET_URL="$5"
+  local TICKET="$6"
   local WEBHOOK_URL
   WEBHOOK_URL="$(git config --get chat.webhook.url)"
 
@@ -945,20 +1259,28 @@ function postToGoogleChat {
   TICKET_TITLE=$(get_jira_ticket_title "$TICKET")
 
   local JIRA_LINK="<a href=\"$TICKET_URL\" target=\"_blank\">Jira Ticket</a>"
-  local PR_LINK_TEST="<a href=\"$URL_TEST\" target=\"_blank\">Deploy/Test Pull Request</a>"
   local PR_LINK_DEVELOP="<a href=\"$URL_DEVELOP\" target=\"_blank\">Develop Pull Request</a>"
   local PR_TITLE_HTML="<b>PR Title:</b> $TITLE"
   local PR_DESCRIPTION_HTML="<b>PR Description:</b><br>$DESCRIPTION"
+  local DRAFT_STATUS="<b>Status:</b> Draft - Awaiting Proofs from Author"
+  local NEXT_STEPS="<b>Next Steps:</b><br>1. <i>>Author:<i> Collect and attach proofs from the development environment.<br>2. <i>Reviewers:<i> Begin reviewing once proofs are attached."
 
+  # Construct the JSON payload without deploy/test PR
   local MESSAGE_PAYLOAD
-  MESSAGE_PAYLOAD=$(jq -n --arg jira_link º"$JIRA_LINK" --arg pr_link_test "$PR_LINK_TEST" --arg pr_link_develop "$PR_LINK_DEVELOP" --arg pr_title_html "$PR_TITLE_HTML" --arg pr_description_html "$PR_DESCRIPTION_HTML" --arg ticket_title "$TICKET_TITLE" '{
+  MESSAGE_PAYLOAD=$(jq -n --arg jira_link "$JIRA_LINK" \
+                           --arg pr_link_develop "$PR_LINK_DEVELOP" \
+                           --arg pr_title_html "$PR_TITLE_HTML" \
+                           --arg pr_description_html "$PR_DESCRIPTION_HTML" \
+                           --arg draft_status "$DRAFT_STATUS" \
+                           --arg next_steps "$NEXT_STEPS" \
+                           --arg ticket_title "$TICKET_TITLE" '{
     "cardsV2": [
       {
         "cardId": "pr-update",
         "card": {
           "header": {
             "title": $ticket_title,
-            "subtitle": "Pull request updated"
+            "subtitle": "New Draft Pull Request Created"
           },
           "sections": [
             {
@@ -975,18 +1297,9 @@ function postToGoogleChat {
                 {
                   "decoratedText": {
                     "icon": {
-                      "knownIcon": "CONFIRMATION_NUMBER_ICON"
-                    },
-                    "topLabel": "PR for deploy/test",
-                    "text": $pr_link_test
-                  }
-                },
-                {
-                  "decoratedText": {
-                    "icon": {
                       "knownIcon": "TICKET"
                     },
-                    "topLabel": "PR for develop",
+                    "topLabel": "Develop Pull Request",
                     "text": $pr_link_develop
                   }
                 }
@@ -1005,6 +1318,20 @@ function postToGoogleChat {
                   }
                 }
               ]
+            },
+            {
+              "widgets": [
+                {
+                  "textParagraph": {
+                    "text": $draft_status
+                  }
+                },
+                {
+                  "textParagraph": {
+                    "text": $next_steps
+                  }
+                }
+              ]
             }
           ]
         }
@@ -1020,8 +1347,6 @@ function postToGoogleChat {
     log_error "Failed to send message to Google Chat."
   fi
 }
-
-alias smartpush="createCommitAndPRs"
 
 function reset_feature_branch {
   local TICKET
@@ -1288,29 +1613,21 @@ function cascadeMerge {
           DTPR_TITLE_NO_EMOJI=$(echo "$DTPR_TITLE" | sed 's/^:[^:]*: //')
 
           if [[ "$DTPR_TITLE_NO_EMOJI" == "$PR_TITLE_NO_EMOJI" ]]; then
-            log "Checking corresponding deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
+            log "Merging corresponding deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
 
-            # Automatically approve the deploy/test PR if not already approved
-            if ! is_approved "$DTPR_NUMBER"; then
-              log "Approving deploy/test PR #$DTPR_NUMBER"
-              approve_pull_request "$DTPR_NUMBER"
+            # Check if the deploy/test PR is approved before merging
+            if is_approved "$DTPR_NUMBER"; then
+              merge_pull_request "$DTPR_NUMBER" "$TRIGGER"
 
               if [ $? -eq 0 ]; then
-                log_success "Successfully approved deploy/test PR #$DTPR_NUMBER"
+                log_success "Successfully merged deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
+                post_comment "$DTPR_NUMBER" ":rocket: This PR was successfully merged via *cascadeMerge* triggered by $TRIGGER."
               else
-                log_error "Failed to approve deploy/test PR #$DTPR_NUMBER"
+                log_error "Failed to merge deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
+                post_comment "$DTPR_NUMBER" ":warning: Failed to merge via *cascadeMerge* triggered by $TRIGGER."
               fi
-            fi
-
-            # Merge the deploy/test PR after approval
-            merge_pull_request "$DTPR_NUMBER" "$TRIGGER"
-
-            if [ $? -eq 0 ]; then
-              log_success "Successfully merged deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
-              post_comment "$DTPR_NUMBER" ":rocket: This PR was successfully merged via *cascadeMerge* triggered by $TRIGGER."
             else
-              log_error "Failed to merge deploy/test PR #$DTPR_NUMBER for feature branch $PR_HEAD"
-              post_comment "$DTPR_NUMBER" ":warning: Failed to merge via *cascadeMerge* triggered by $TRIGGER."
+              log "Skipping deploy/test PR #$DTPR_NUMBER: $DTPR_TITLE (not approved)"
             fi
           fi
         done
