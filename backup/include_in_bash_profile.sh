@@ -401,7 +401,7 @@ function createPullRequest {
   local API_KEY
   API_KEY=$(git config --get github.token)
   local REPO
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   local USER
   USER=$(safe_curl -s -H "Authorization: token $(git config --get github.token)" https://api.github.com/user | jq -r .login)
   local ORG
@@ -475,7 +475,7 @@ function checkExistingPullRequest {
   local API_KEY
   API_KEY=$(git config --get github.token)
   local REPO
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   local ORG
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   local REPO_NAME
@@ -495,6 +495,10 @@ function checkExistingPullRequest {
 }
 
 function createCommitAndPRs {
+  # Enable strict error handling
+  set -e
+  set -o pipefail
+
   # Check if a ticket number is provided
   if [ -z "$1" ]; then
     log_error "Please provide a ticket number."
@@ -1259,7 +1263,7 @@ function postToGoogleChat {
   local PR_TITLE_HTML="<b>PR Title:</b> $TITLE"
   local PR_DESCRIPTION_HTML="<b>PR Description:</b><br>$DESCRIPTION"
   local DRAFT_STATUS="<b>Status:</b> Draft - Awaiting Proofs from Author"
-  local NEXT_STEPS="<b>Next Steps:</b><br>1. <i>Author:<i> Collect and attach proofs from the development environment.<br>2. <i>Reviewers:<i> Begin reviewing once proofs are attached."
+  local NEXT_STEPS="<b>Next Steps:</b><br>1. <i>>Author:<i> Collect and attach proofs from the development environment.<br>2. <i>Reviewers:<i> Begin reviewing once proofs are attached."
 
   # Construct the JSON payload without deploy/test PR
   local MESSAGE_PAYLOAD
@@ -1431,7 +1435,7 @@ function get_pull_requests {
   local API_URL
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls?base=$BASE_BRANCH&state=open&sort=created&direction=asc"
@@ -1452,7 +1456,7 @@ function merge_pull_request {
   local JSON_DATA
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/merge"
@@ -1480,7 +1484,7 @@ function is_approved {
   local APPROVED
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/reviews"
@@ -1505,7 +1509,7 @@ function approve_pull_request {
   local JSON_DATA
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/reviews"
@@ -1537,7 +1541,7 @@ function post_comment {
   local API_URL
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
+  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/comments"
