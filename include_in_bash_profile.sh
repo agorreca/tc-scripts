@@ -495,10 +495,6 @@ function checkExistingPullRequest {
 }
 
 function createCommitAndPRs {
-  # Enable strict error handling
-  set -e
-  set -o pipefail
-
   # Check if a ticket number is provided
   if [ -z "$1" ]; then
     log_error "Please provide a ticket number."
