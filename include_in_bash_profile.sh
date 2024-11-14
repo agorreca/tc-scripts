@@ -401,7 +401,7 @@ function createPullRequest {
   local API_KEY
   API_KEY=$(git config --get github.token)
   local REPO
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   local USER
   USER=$(safe_curl -s -H "Authorization: token $(git config --get github.token)" https://api.github.com/user | jq -r .login)
   local ORG
@@ -475,7 +475,7 @@ function checkExistingPullRequest {
   local API_KEY
   API_KEY=$(git config --get github.token)
   local REPO
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   local ORG
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   local REPO_NAME
@@ -1435,7 +1435,7 @@ function get_pull_requests {
   local API_URL
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls?base=$BASE_BRANCH&state=open&sort=created&direction=asc"
@@ -1456,7 +1456,7 @@ function merge_pull_request {
   local JSON_DATA
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/merge"
@@ -1484,7 +1484,7 @@ function is_approved {
   local APPROVED
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/reviews"
@@ -1509,7 +1509,7 @@ function approve_pull_request {
   local JSON_DATA
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/pulls/$PR_NUMBER/reviews"
@@ -1541,7 +1541,7 @@ function post_comment {
   local API_URL
 
   API_KEY=$(git config --get github.token)
-  REPO=$(git config --get remote.origin.url | sed 's/.*:\(.*\)\.git/\1/')
+  REPO=$(git config --get remote.origin.url | sed -E 's/(git@|https:\/\/)([^\/:]+)[\/:]([^\/]+\/[^\/]+)\.git/\3/')
   ORG=$(echo "$REPO" | cut -d '/' -f 1)
   REPO_NAME=$(echo "$REPO" | cut -d '/' -f 2)
   API_URL="https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/comments"
