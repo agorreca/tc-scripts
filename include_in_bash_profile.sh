@@ -530,18 +530,27 @@ function createCommitAndPRs {
     return 1
   fi
 
-  # Stash any uncommitted changes
+  # Stash any uncommitted changes with a unique name
   log "Stashing changes..."
-  git stash save "Stash before creating commit and PRs" || {
+  git stash push -m "Stash for $TICKET" || {
     log_error "Failed to stash changes."
     return 1
   }
 
-  # Update the develop branch
+  # Get the stash reference for later use (remove the trailing colon)
+  local STASH_REF
+  STASH_REF=$(git stash list | grep "Stash for $TICKET" | head -n 1 | awk '{print $1}' | sed 's/:$//')
+
+  if [ -z "$STASH_REF" ]; then
+    log_error "Failed to retrieve the stash reference."
+    return 1
+  fi
+
+  # Switch to the develop branch
   log "Switching to develop branch..."
   git checkout develop || {
     log_error "Failed to checkout develop branch."
-    git stash pop
+    git stash pop "$STASH_REF"
     return 1
   }
 
@@ -549,7 +558,7 @@ function createCommitAndPRs {
   git pull origin develop || {
     log_error "Failed to pull latest changes from develop."
     git checkout -
-    git stash pop
+    git stash pop "$STASH_REF"
     return 1
   }
 
@@ -558,13 +567,17 @@ function createCommitAndPRs {
   git checkout -B "$BRANCH" || {
     log_error "Failed to create or switch to branch '$BRANCH'."
     git checkout develop
-    git stash pop
+    git stash pop "$STASH_REF"
     return 1
   }
 
-  # Apply stashed changes
-  log "Applying stashed changes..."
-  git stash pop || log_warning "No stashed changes to apply."
+  # Apply stashed changes to the feature branch
+  log "Applying stashed changes to feature branch..."
+  git stash apply "$STASH_REF" || {
+    log_error "Failed to apply stashed changes to feature branch."
+    git checkout develop
+    return 1
+  }
 
   # Run checks: type-check, linting, formatting, and tests
   log "Running type check, linting, formatting, and tests..."
@@ -609,7 +622,7 @@ function createCommitAndPRs {
   # Check if the remote branch exists
   log "Checking if remote branch '$BRANCH' exists..."
   if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
-    log "Remote branch exists. Pulling latest changes via merge..."
+    log "Remote branch exists. Pulling latest changes..."
     git pull origin "$BRANCH" || {
       log_error "Failed to pull latest changes from remote branch '$BRANCH'."
       git checkout develop
@@ -666,32 +679,46 @@ function createCommitAndPRs {
     return 1
   }
 
-  # Merge feature branch into deploy/test
-  log "Merging feature branch '$BRANCH' into deploy/test..."
-  if ! git merge "$BRANCH" --no-ff -m "Merge $BRANCH into deploy/test"; then
-    log_warning "Merge conflicts detected. Attempting to resolve by preferring 'theirs'."
-
-    # Attempt to resolve conflicts by preferring feature branch changes
-    if git merge "$BRANCH" --strategy-option theirs --no-ff -m "Merge $BRANCH into deploy/test"; then
-      log_success "Conflicts resolved automatically by preferring 'theirs'."
-    else
-      log_error "Automatic conflict resolution failed. Please resolve conflicts manually."
+  # Apply stashed changes to deploy/test
+  log "Applying stashed changes to deploy/test..."
+  git stash apply "$STASH_REF" || {
+    log_error "Failed to apply stashed changes to deploy/test."
       git checkout develop
       return 1
-    fi
+  }
+
+  # Drop the stash after applying to deploy/test
+  git stash drop "$STASH_REF" || {
+    log_warning "Failed to drop stash '$STASH_REF'. Please drop it manually."
+  }
+
+  # Run checks again on deploy/test
+  log "Running type check, linting, formatting, and tests on deploy/test..."
+  if ! run_checks; then
+    log_error "Type check, linting, formatting, or tests failed on deploy/test. Aborting."
+    git checkout develop
+    return 1
   fi
 
-  # Amend the merge commit to unify commits
-  log "Amending merge commit to unify commits..."
-  git commit --amend --no-edit || {
-    log_error "Failed to amend merge commit."
+  # Stage all changes on deploy/test
+  log "Staging all changes on deploy/test..."
+  git add . || {
+    log_error "Failed to stage changes on deploy/test."
+    git checkout develop
+    return 1
+  }
+
+  # Commit changes on deploy/test
+  log "Committing changes on deploy/test..."
+  git commit -m "Apply changes from $BRANCH" || {
+    log_error "Failed to commit changes on deploy/test."
     git checkout develop
     return 1
   }
 
   # Push the updated deploy/test branch to remote
-  log "Pushing updated deploy/test branch to remote with --force-with-lease..."
-  git push origin deploy/test --force-with-lease || {
+  log "Pushing updated deploy/test branch to remote..."
+  git push origin deploy/test || {
     log_error "Failed to push updated deploy/test branch to remote."
     git checkout develop
     return 1
@@ -736,7 +763,7 @@ function createCommitAndPRs {
 
   # Send PR details to Google Chat
   log "Sending Pull Request details to Google Chat..."
-  postToGoogleChat "created" "$PR_URL_DEVELOP" "$COMMIT_TITLE" "$COMMIT_BODY" "$JIRA_URL" "$TICKET" || {
+  postToGoogleChat "created" "$PR_URL_DEVELOP" "$COMMIT_TITLE" "$COMMIT_BODY" "$TICKET_URL" "$TICKET" || {  # Updated line
     log_warning "Failed to send Pull Request details to Google Chat."
   }
 
@@ -1749,4 +1776,54 @@ function generateChangelog {
   echo -e "$TEMP_CHANGELOG" >> $CHANGELOG_FILE
 
   log_success "Changelog generated and saved to $CHANGELOG_FILE"
+}
+
+#!/bin/bash
+
+# Function to merge a feature branch into deploy/test
+merge_to_deploy_test() {
+  if [ -z "$1" ]; then
+    log_error "Usage: merge_to_deploy_test <branch_suffix>"
+    return 1
+  fi
+
+  # Ensure the prefix for the feature branch
+  local TICKET
+  TICKET=$(ensure_prefix "$1")
+  local BRANCH="feature/$TICKET"
+
+  log "Fetching latest references from remote..."
+  git fetch origin || {
+    log_error "Failed to fetch remote references."
+    return 1
+  }
+
+  log "Checking out 'develop' branch..."
+  git checkout develop || {
+    log_error "Failed to checkout 'develop' branch."
+    return 1
+  }
+
+  log "Deleting local 'deploy/test' branch if it exists..."
+  git branch -D deploy/test 2>/dev/null || log_warning "Local 'deploy/test' branch does not exist."
+
+  log "Creating and checking out 'deploy/test' branch..."
+  git checkout -b deploy/test || {
+    log_error "Failed to create and checkout 'deploy/test' branch."
+    return 1
+  }
+
+  log "Merging '$BRANCH' into 'deploy/test'..."
+  git merge "$BRANCH" --strategy-option=theirs --no-ff -m "Merge $BRANCH into deploy/test" || {
+    log_error "Merge failed. Please resolve conflicts manually."
+    return 1
+  }
+
+  log "Pushing 'deploy/test' branch to remote..."
+  git push --force-with-lease origin deploy/test || {
+    log_error "Failed to push 'deploy/test' branch to remote."
+    return 1
+  }
+
+  log_success "Successfully merged and pushed '$BRANCH' into 'deploy/test'."
 }
