@@ -1283,10 +1283,10 @@ function postToGoogleChat {
 
   local JIRA_LINK="<a href=\"$TICKET_URL\" target=\"_blank\">Jira Ticket</a>"
   local PR_LINK_DEVELOP="<a href=\"$URL_DEVELOP\" target=\"_blank\">Develop Pull Request</a>"
-  local PR_TITLE_HTML="<b>PR Title:</b> $TITLE"
-  local PR_DESCRIPTION_HTML="<b>PR Description:</b><br>$DESCRIPTION"
+  local PR_TITLE_HTML="<b>$TITLE</b>"
+  local PR_DESCRIPTION_HTML="$DESCRIPTION"
   local DRAFT_STATUS="<b>Status:</b> Draft - Awaiting Proofs from Author"
-  local NEXT_STEPS="<b>Next Steps:</b><br>1. <i>Author:<i> Collect and attach proofs from the development environment.<br>2. <i>Reviewers:<i> Begin reviewing once proofs are attached."
+  local NEXT_STEPS="<b>Next Steps:</b><br>1. <i>Author:</i> Attach proofs.<br>2. <i>Reviewers:</i> Keep reviewing the PR."
 
   # Construct the JSON payload without deploy/test PR
   local MESSAGE_PAYLOAD
