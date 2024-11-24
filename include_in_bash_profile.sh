@@ -8,6 +8,7 @@ alias smartpush="createCommitAndPRs"
 DIFF_TO_COMMIT_MSG_PROMPT="Given the following diff, generate a conventional commit message (with type, scope, description, body).
 The title should follow the format '<emoji> <type>(%s): <description>' or ':rotating_light: <type>(%s)!: <description>' for breaking changes.
 Write it in simple English and in a markdown formatted text block without using triple backticks, except for the first and last.
+Use one bullet level, and do not add another sentence after the bullets.
 |
 Use the appropriate emoji based on the commit type:
 - feat: :sparkles:
@@ -29,13 +30,8 @@ Examples:
 
 COMMIT_MESSAGE_EXAMPLE=":sparkles: feat(ATM-120): complete WorkstreamStatus component and add new status icons
 
-- Finalized the implementation of the WorkstreamStatus component:
-  - Added dynamic workstream selection
-  - Displayed workstream statuses
-  - Implemented detailed view for each workstream
-- Added new SVG icons for various statuses:
-  - done
-  - undone
+- Finalized the implementation of the WorkstreamStatus component
+- Added new SVG icons for various statuses
 - Removed an unused import from the Snackbar component"
 
 
@@ -434,20 +430,20 @@ function createPullRequest {
     return 1
   fi
 
-#  # Add assignee after creating the PR
-#  local ASSIGNEE_DATA
-#  ASSIGNEE_DATA=$(jq -n --arg assignee "$USER" '{
-#    assignees: [$assignee]
-#  }')
-#
-#  local ASSIGNEE_RESPONSE
-#  ASSIGNEE_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$ASSIGNEE_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/assignees")
-#
-#  if ! echo "$ASSIGNEE_RESPONSE" | grep -q '"login":'; then
-#    log_error "Failed to add assignee: $(echo "$ASSIGNEE_RESPONSE" | jq -r '.message')"
-#    return 1
-#  fi
-#
+  # Add assignee after creating the PR
+  local ASSIGNEE_DATA
+  ASSIGNEE_DATA=$(jq -n --arg assignee "$USER" '{
+    assignees: [$assignee]
+  }')
+
+  local ASSIGNEE_RESPONSE
+  ASSIGNEE_RESPONSE=$(safe_curl -s -H "Authorization: token $API_KEY" -d "$ASSIGNEE_DATA" "https://api.github.com/repos/$ORG/$REPO_NAME/issues/$PR_NUMBER/assignees")
+
+  if ! echo "$ASSIGNEE_RESPONSE" | grep -q '"login":'; then
+    log_error "Failed to add assignee: $(echo "$ASSIGNEE_RESPONSE" | jq -r '.message')"
+    return 1
+  fi
+
 #  # Get the default reviewer from git config
 #  local DEFAULT_REVIEWER
 #  DEFAULT_REVIEWER=$(git config --get github.default.reviewer)
@@ -1826,4 +1822,79 @@ merge_to_deploy_test() {
   }
 
   log_success "Successfully merged and pushed '$BRANCH' into 'deploy/test'."
+}
+
+function get_ticket_info {
+  # Check if at least one ticket number was provided
+  if [ -z "$1" ]; then
+    log_error "Please provide at least one ticket number, separated by commas."
+    return 1
+  fi
+
+  local TICKET_INPUT="$1"
+
+  # Parse the comma-separated ticket numbers into an array
+  local TICKETS
+  TICKETS=($(parse_tickets "$TICKET_INPUT"))
+
+  # Get the base Jira URL from Git configuration
+  local JIRA_URL
+  JIRA_URL=$(git config --get jira.url)
+
+  if [ -z "$JIRA_URL" ]; then
+    log_error "JIRA URL is not configured in Git."
+    return 1
+  fi
+
+  # Get Jira credentials from Git configuration
+  local JIRA_EMAIL
+  JIRA_EMAIL=$(git config --get jira.email)
+  local JIRA_TOKEN
+  JIRA_TOKEN=$(git config --get jira.token)
+
+  if [ -z "$JIRA_EMAIL" ] || [ -z "$JIRA_TOKEN" ]; then
+    log_error "Jira email or token is not configured in Git."
+    return 1
+  fi
+
+  # Iterate over each ticket number and fetch its information
+  for TICKET_NUMBER in "${TICKETS[@]}"; do
+    # Ensure the ticket has the correct prefix, e.g., ATM-867
+    local TICKET
+    TICKET=$(ensure_prefix "$TICKET_NUMBER")
+
+    # Fetch ticket information from Jira using the API
+    local RESPONSE
+    RESPONSE=$(safe_curl -s -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+      -H "Content-Type: application/json" \
+      -X GET "$JIRA_URL/rest/api/2/issue/$TICKET")
+
+    # Clean the JSON response
+    RESPONSE=$(clean_json_response "$RESPONSE")
+
+    # Check for errors in the response
+    if echo "$RESPONSE" | jq -e '.errorMessages' > /dev/null; then
+      log_error "Error fetching ticket $TICKET: $(echo "$RESPONSE" | jq -r '.errorMessages[]')"
+      continue
+    fi
+
+    # Extract components and format them with brackets, e.g., [VENUS] [WEB]
+    local COMPONENTS
+    COMPONENTS=$(echo "$RESPONSE" | jq -r '.fields.components[].name' | sed 's/.*/[&]/' | paste -sd' ' -)
+
+    # Extract the ticket summary (title)
+    local SUMMARY
+    SUMMARY=$(echo "$RESPONSE" | jq -r '.fields.summary')
+
+    # Output the formatted ticket information
+    if [ -n "$COMPONENTS" ]; then
+      echo "$TICKET: $COMPONENTS - $SUMMARY"
+    else
+      echo "$TICKET: $SUMMARY"
+    fi
+
+    # Construct and display the Jira ticket URL
+    echo "$JIRA_URL/browse/$TICKET"
+    echo ""  # Add an empty line for better readability
+  done
 }
