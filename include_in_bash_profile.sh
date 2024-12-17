@@ -508,6 +508,22 @@ function createCommitAndPRs {
     return 1
   fi
 
+  # Resolve the base branch
+  local BASE_BRANCH="develop" # Default base branch
+  if [ -n "$2" ]; then
+    local USER_BASE_BRANCH="$2"
+    if [[ "$USER_BASE_BRANCH" == feature/* ]]; then
+      BASE_BRANCH="$USER_BASE_BRANCH"
+    elif [[ "$USER_BASE_BRANCH" =~ ^[A-Z]+-[0-9]+$ ]]; then
+      BASE_BRANCH="feature/$USER_BASE_BRANCH"
+    elif [[ "$USER_BASE_BRANCH" =~ ^[0-9]+$ ]]; then
+      BASE_BRANCH="feature/$(ensure_prefix "$USER_BASE_BRANCH")"
+    else
+      log_error "Invalid base branch format: '$USER_BASE_BRANCH'."
+      return 1
+    fi
+  fi
+
   local BRANCH="feature/$TICKET"
   local JIRA_URL
   JIRA_URL=$(git config --get jira.url)
@@ -542,17 +558,17 @@ function createCommitAndPRs {
     return 1
   fi
 
-  # Switch to the develop branch
-  log "Switching to develop branch..."
-  git checkout develop || {
-    log_error "Failed to checkout develop branch."
+  # Switch to the base branch
+  log "Switching to base branch '$BASE_BRANCH'..."
+  git checkout "$BASE_BRANCH" || {
+    log_error "Failed to checkout base branch '$BASE_BRANCH'."
     git stash pop "$STASH_REF"
     return 1
   }
 
-  log "Pulling latest changes from develop..."
-  git pull origin develop || {
-    log_error "Failed to pull latest changes from develop."
+  log "Pulling latest changes from '$BASE_BRANCH'..."
+  git pull origin "$BASE_BRANCH" || {
+    log_error "Failed to pull latest changes from '$BASE_BRANCH'."
     git checkout -
     git stash pop "$STASH_REF"
     return 1
@@ -562,7 +578,7 @@ function createCommitAndPRs {
   log "Creating or switching to feature branch '$BRANCH'..."
   git checkout -B "$BRANCH" || {
     log_error "Failed to create or switch to branch '$BRANCH'."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     git stash pop "$STASH_REF"
     return 1
   }
@@ -571,7 +587,7 @@ function createCommitAndPRs {
   log "Applying stashed changes to feature branch..."
   git stash apply "$STASH_REF" || {
     log_error "Failed to apply stashed changes to feature branch."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     return 1
   }
 
@@ -579,7 +595,7 @@ function createCommitAndPRs {
   log "Running type check, linting, formatting, and tests..."
   if ! run_checks; then
     log_error "Type check, linting, formatting, or tests failed. Aborting."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     return 1
   fi
 
@@ -587,7 +603,7 @@ function createCommitAndPRs {
   log "Staging all changes..."
   git add . || {
     log_error "Failed to stage changes."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     return 1
   }
 
@@ -595,7 +611,7 @@ function createCommitAndPRs {
   log "Generating commit message..."
   diffToCommitMsg "$TICKET" || {
     log_error "Failed to generate commit message."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     return 1
   }
 
@@ -603,7 +619,7 @@ function createCommitAndPRs {
   log "Committing changes..."
   git commit || {
     log_error "Failed to commit changes."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     return 1
   }
 
@@ -611,7 +627,7 @@ function createCommitAndPRs {
   log "Amending commit to unify multiple commits..."
   git commit --amend --no-edit || {
     log_error "Failed to amend commit."
-    git checkout develop
+    git checkout "$BASE_BRANCH"
     return 1
   }
 
@@ -621,7 +637,8 @@ function createCommitAndPRs {
     log "Remote branch exists. Pulling latest changes..."
     git pull origin "$BRANCH" || {
       log_error "Failed to pull latest changes from remote branch '$BRANCH'."
-      git checkout develop
+      git checkout "$BASE_BRANCH"
+      git stash pop "$STASH_REF"
       return 1
     }
   else
@@ -633,21 +650,21 @@ function createCommitAndPRs {
     log "Pushing feature branch '$BRANCH' to remote with --force-with-lease..."
     git push -u origin "$BRANCH" --force-with-lease || {
       log_error "Failed to push feature branch '$BRANCH' to remote."
-      git checkout develop
+      git checkout "$BASE_BRANCH"
       return 1
     }
   else
     log "Pushing new feature branch '$BRANCH' to remote..."
     git push -u origin "$BRANCH" || {
       log_error "Failed to push new feature branch '$BRANCH' to remote."
-      git checkout develop
+      git checkout "$BASE_BRANCH"
       return 1
     }
   fi
 
   # Get the latest commit title and body
   local COMMIT_TITLE
-  COMMIT_TITLE=$(git log -1 --pretty=format:%s | sed 's/^:[^ ]* //')
+  COMMIT_TITLE=$(git log -1 --pretty=format:%s)
 
   local COMMIT_BODY
   COMMIT_BODY=$(git log -1 --pretty=format:%b)
@@ -656,89 +673,31 @@ function createCommitAndPRs {
   COMMIT_TITLE=$(echo "$COMMIT_TITLE" | sed "s/[’‘]/'/g; s/[“”]/\"/g")
   COMMIT_BODY=$(echo "$COMMIT_BODY" | sed "s/[’‘]/'/g; s/[“”]/\"/g")
 
-  # Delete the local deploy/test branch if it exists
-  log "Deleting local deploy/test branch if it exists..."
-  git branch -D deploy/test >/dev/null 2>&1 || log_warning "Local deploy/test branch does not exist."
-
-  # Checkout the deploy/test branch from remote
-  log "Checking out deploy/test branch..."
-  if ! git checkout deploy/test; then
-    log_error "deploy/test branch does not exist remotely."
-    git checkout develop
-    return 1
+  # Determine the target branch for the Pull Request
+  local TARGET_BRANCH="develop" # Default target branch
+  if [ -n "$2" ]; then
+    TARGET_BRANCH="$BASE_BRANCH"
   fi
 
-  log "Fetching latest changes for deploy/test..."
-  git fetch origin deploy/test || {
-    log_error "Failed to fetch latest changes for deploy/test."
-    git checkout develop
-    return 1
-  }
+  # Create Pull Request to the target branch in draft mode
+  log "Creating draft Pull Request to '$TARGET_BRANCH' branch..."
 
-  # Apply stashed changes to deploy/test
-  log "Applying stashed changes to deploy/test..."
-  git stash apply "$STASH_REF" || {
-    log_error "Failed to apply stashed changes to deploy/test."
-      git checkout develop
-      return 1
-  }
+  # Check if a PR already exists for the target branch
+  local EXISTING_PR
+  EXISTING_PR=$(checkExistingPullRequest "$TARGET_BRANCH" "$BRANCH")
 
-  # Drop the stash after applying to deploy/test
-  git stash drop "$STASH_REF" || {
-    log_warning "Failed to drop stash '$STASH_REF'. Please drop it manually."
-  }
-
-  # Run checks again on deploy/test
-  log "Running type check, linting, formatting, and tests on deploy/test..."
-  if ! run_checks; then
-    log_error "Type check, linting, formatting, or tests failed on deploy/test. Aborting."
-    git checkout develop
-    return 1
-  fi
-
-  # Stage all changes on deploy/test
-  log "Staging all changes on deploy/test..."
-  git add . || {
-    log_error "Failed to stage changes on deploy/test."
-    git checkout develop
-    return 1
-  }
-
-  # Commit changes on deploy/test
-  log "Committing changes on deploy/test..."
-  git commit -m "Apply changes from $BRANCH" || {
-    log_error "Failed to commit changes on deploy/test."
-    git checkout develop
-    return 1
-  }
-
-  # Push the updated deploy/test branch to remote
-  log "Pushing updated deploy/test branch to remote..."
-  git push origin deploy/test || {
-    log_error "Failed to push updated deploy/test branch to remote."
-    git checkout develop
-    return 1
-  }
-
-  # Create Pull Request to develop in draft mode
-  log "Creating draft Pull Request to develop branch..."
-
-  # Check if a PR already exists for develop
-  local EXISTING_PR_DEVELOP
-  EXISTING_PR_DEVELOP=$(checkExistingPullRequest "develop" "$BRANCH")
-
-  local PR_URL_DEVELOP
-  if [ "$(echo "$EXISTING_PR_DEVELOP" | jq '. | length')" -gt 0 ]; then
-    log "An existing Pull Request to develop was found. Using existing PR."
-    PR_URL_DEVELOP=$(echo "$EXISTING_PR_DEVELOP" | jq -r '.[0].html_url')
+  local PR_URL
+  if [ "$(echo "$EXISTING_PR" | jq '. | length')" -gt 0 ]; then
+    log "An existing Pull Request to '$TARGET_BRANCH' was found. Using existing PR."
+    PR_URL=$(echo "$EXISTING_PR" | jq -r '.[0].html_url')
   else
-    log "Creating a new draft Pull Request to develop..."
+    log "Creating a new draft Pull Request to '$TARGET_BRANCH'..."
 
     # Get the Jira ticket title
     local JIRA_TITLE
     JIRA_TITLE=$(get_jira_ticket_title "$TICKET") || {
       log_error "Failed to get Jira ticket title for '$TICKET'."
-      git checkout develop
+      git checkout "$BASE_BRANCH"
       return 1
     }
 
@@ -748,22 +707,20 @@ function createCommitAndPRs {
       "$TICKET" "$JIRA_TITLE" "$TICKET_URL" "$COMMIT_TITLE" "$COMMIT_BODY")
 
     # Create the Pull Request in draft mode
-    PR_URL_DEVELOP=$(createPullRequest "develop" ":test_tube: $COMMIT_TITLE" "$PR_BODY" "$BRANCH" true) || {
-      log_error "Failed to create draft Pull Request to develop."
-      git checkout develop
+    PR_URL=$(createPullRequest "$TARGET_BRANCH" "$COMMIT_TITLE" "$PR_BODY" "$BRANCH" true) || {
+      log_error "Failed to create draft Pull Request to '$TARGET_BRANCH'."
+      git checkout "$BASE_BRANCH"
       return 1
     }
 
-    log "Draft Pull Request to develop created successfully: $PR_URL_DEVELOP."
+    log "Draft Pull Request to '$TARGET_BRANCH' created successfully: $PR_URL."
   fi
 
   # Send PR details to Google Chat
   log "Sending Pull Request details to Google Chat..."
-  postToGoogleChat "created" "$PR_URL_DEVELOP" "$COMMIT_TITLE" "$COMMIT_BODY" "$TICKET_URL" "$TICKET" || {  # Updated line
+  postToGoogleChat "created" "$PR_URL" "$COMMIT_TITLE" "$COMMIT_BODY" "$TICKET_URL" "$TICKET" || {
     log_warning "Failed to send Pull Request details to Google Chat."
   }
-
-  log_success "Commit and PRs created/updated successfully for $TICKET."
 
   # Update Jira ticket: transition and assign
   log "Updating Jira ticket '$TICKET'..."
@@ -772,13 +729,83 @@ function createCommitAndPRs {
 
   # Add a comment to the Jira ticket
   log "Adding comment to Jira ticket..."
-  addJiraComment "$TICKET" "$COMMIT_TITLE" "$COMMIT_BODY" "$PR_URL_DEVELOP" || log_warning "Failed to add comment to Jira ticket."
+  addJiraComment "$TICKET" "$COMMIT_TITLE" "$COMMIT_BODY" "$PR_URL" || log_warning "Failed to add comment to Jira ticket."
 
-  # Switch back to the develop branch
-  log "Switching back to develop branch..."
-  git checkout develop || {
-    log_error "Failed to switch back to develop branch."
+  # Switch back to the base branch
+  log "Switching back to base branch '$BASE_BRANCH'..."
+  git checkout "$BASE_BRANCH" || {
+    log_error "Failed to switch back to base branch '$BASE_BRANCH'."
     return 1
+  }
+
+  # Now perform deploy/test steps at the end
+  {
+    # Delete the local deploy/test branch if it exists
+    log "Deleting local deploy/test branch if it exists..."
+    git branch -D deploy/test >/dev/null 2>&1 || log_warning "Local deploy/test branch does not exist."
+
+    log "Fetching latest changes for deploy/test..."
+    git fetch origin deploy/test || {
+      log_error "Failed to fetch latest changes for deploy/test."
+      git checkout "$BASE_BRANCH"
+      return 1
+    }
+
+    # Checkout the deploy/test branch from remote
+    log "Checking out deploy/test branch..."
+    if ! git checkout deploy/test; then
+      log_error "deploy/test branch does not exist remotely."
+      return 1
+    fi
+
+    # Apply stashed changes to deploy/test
+    log "Applying stashed changes to deploy/test..."
+    git stash apply "$STASH_REF" || {
+      log_error "Failed to apply stashed changes to deploy/test."
+      git checkout "$BASE_BRANCH"
+      return 1
+    }
+
+    # Run checks: type-check, linting, formatting, and tests
+    log "Running type check, linting, formatting, and tests on deploy/test..."
+    if ! run_checks; then
+      log_error "Type check, linting, formatting, or tests failed on deploy/test."
+      git checkout "$BASE_BRANCH"
+      return 1
+    fi
+
+    # Stage all changes on deploy/test
+    log "Staging all changes on deploy/test..."
+    git add . || {
+      log_error "Failed to stage changes on deploy/test."
+      git checkout "$BASE_BRANCH"
+      return 1
+    }
+
+    # Commit changes on deploy/test
+    log "Committing changes on deploy/test..."
+    git commit -m "Apply changes from $BRANCH" || {
+      log_error "Failed to commit changes on deploy/test."
+      git checkout "$BASE_BRANCH"
+      return 1
+    }
+
+    # Push the updated deploy/test branch to remote
+    log "Pushing updated deploy/test branch to remote..."
+    git push origin deploy/test || {
+      log_error "Failed to push updated deploy/test branch to remote."
+      git checkout "$BASE_BRANCH"
+      return 1
+    }
+
+    # Drop the stash after applying to deploy/test
+    git stash drop "$STASH_REF" || {
+      log_warning "Failed to drop stash '$STASH_REF'. Please drop it manually."
+    }
+
+    log_success "Deploy/test completed successfully for ticket '$TICKET'."
+  } || {
+    log_warning "Deploy/test steps encountered issues for ticket '$TICKET'."
   }
 
   log_success "Operation completed successfully for ticket '$TICKET'."
@@ -1897,4 +1924,63 @@ function get_ticket_info {
     echo "$JIRA_URL/browse/$TICKET"
     echo ""  # Add an empty line for better readability
   done
+}
+
+function autoCommitWithTicket() {
+  # Get the ticket number from the branch name if not provided
+  local TICKET=${1:-$(git rev-parse --abbrev-ref HEAD | grep -oE "[A-Z]+-[0-9]+")}
+
+  if [ -z "$TICKET" ]; then
+    echo "Error: Could not find the ticket number from the branch name or input."
+    return 1
+  fi
+
+  echo "Using ticket number: $TICKET"
+
+  # Stash changes as a backup
+  echo "Creating a stash backup..."
+  git stash push -m "Backup before autoCommitWithTicket for $TICKET"
+
+  # Apply stash changes
+  echo "Restoring stash changes..."
+  git stash apply
+
+  # Add all changes to the staging area
+  echo "Adding all changes..."
+  git add .
+
+  # Check for changes to commit
+  if git diff --cached --quiet; then
+    echo "No changes found to commit. Restoring stash if needed."
+    git stash drop  # Drop the stash if there are no changes
+    return 1
+  fi
+
+  # Generate a commit message
+  echo "Generating commit message for ticket: $TICKET..."
+  diffToCommitMsg "$TICKET"
+
+  # Pause for the user to edit the commit message
+  echo "Waiting for the commit message..."
+  git commit || {
+    echo "Commit failed. Restoring stash."
+    git stash apply
+    return 1
+  }
+
+  echo "Commit created successfully."
+
+  # Start an interactive rebase
+  echo "Starting interactive rebase..."
+  git rebase -i $(git merge-base HEAD develop)
+
+  # Push the changes
+  echo "Pushing changes..."
+  git push --force-with-lease || {
+    echo "Push failed. Restoring stash."
+    git stash apply
+    return 1
+  }
+
+  echo "Changes pushed successfully."
 }
