@@ -1154,7 +1154,7 @@ function addJiraComment {
         content: [
           {
             type: "text",
-            text: "Develop Pull Request",
+            text: "Pull Request Link",
             marks: [
               {
                 type: "link",
@@ -1804,7 +1804,7 @@ function generateChangelog {
 #!/bin/bash
 
 # Function to merge a feature branch into deploy/test
-merge_to_deploy_test() {
+function merge_to_deploy_test() {
   if [ -z "$1" ]; then
     log_error "Usage: merge_to_deploy_test <branch_suffix>"
     return 1
@@ -1983,4 +1983,141 @@ function autoCommitWithTicket() {
   }
 
   echo "Changes pushed successfully."
+}
+
+# Function to fetch branch names from open PRs against a specified base branch, sorted by creation date
+function fetch_open_pr_branches {
+  local BASE_BRANCH="$1"
+
+  # Fetch open PRs against the base branch
+  local PRS_JSON
+  PRS_JSON=$(get_pull_requests "$BASE_BRANCH")
+
+  # Check if the API call was successful
+  if [ -z "$PRS_JSON" ]; then
+    log_error "Failed to fetch pull requests for base branch '$BASE_BRANCH'."
+    return 1
+  fi
+
+  # Extract branch names sorted by creation date (oldest first)
+  local BRANCH_LIST
+  BRANCH_LIST=$(echo "$PRS_JSON" | jq -r 'sort_by(.created_at) | .[] | .head.ref')
+
+  # Convert the list into an array
+  echo "${BRANCH_LIST[@]}"
+}
+
+function recreateDeployTest {
+  local LOG_FILE="/tmp/recreate_deploy_test.log"
+
+  # Initialize or append to the log file with a new run header
+  {
+    echo "===== Recreate Deploy/Test run on $(date) ====="
+  } >> "$LOG_FILE"
+
+  # 1. Switch to 'develop' branch
+  log "Switching to 'develop' branch..." | tee -a "$LOG_FILE"
+  git checkout develop || {
+    log_error "Failed to checkout 'develop' branch." | tee -a "$LOG_FILE"
+    return 1
+  }
+
+  log "Pulling latest changes from 'develop'..." | tee -a "$LOG_FILE"
+  git pull origin develop || {
+    log_error "Failed to pull from 'develop' branch." | tee -a "$LOG_FILE"
+    return 1
+  }
+
+  # 2. Handle 'deploy/test' branch
+  if git show-ref --verify --quiet "refs/heads/deploy/test"; then
+    log "Switching to existing 'deploy/test' branch..." | tee -a "$LOG_FILE"
+    git checkout deploy/test || {
+      log_error "Failed to checkout 'deploy/test' branch." | tee -a "$LOG_FILE"
+      return 1
+    }
+
+    log "Pulling latest changes from 'deploy/test'..." | tee -a "$LOG_FILE"
+    git pull origin deploy/test || {
+      log_error "Failed to pull from 'deploy/test' branch." | tee -a "$LOG_FILE"
+      return 1
+    }
+  else
+    log "Creating 'deploy/test' branch from 'develop'..." | tee -a "$LOG_FILE"
+    git checkout -b deploy/test || {
+      log_error "Failed to create 'deploy/test' branch." | tee -a "$LOG_FILE"
+      return 1
+    }
+
+    log "Pushing 'deploy/test' branch to remote..." | tee -a "$LOG_FILE"
+    git push -u origin deploy/test || {
+      log_error "Failed to push 'deploy/test' branch to remote." | tee -a "$LOG_FILE"
+      return 1
+    }
+  fi
+
+  # 3. Fetch open PR branches against 'develop'
+  log "Fetching open PRs against 'develop' branch..." | tee -a "$LOG_FILE"
+  local branches=($(fetch_open_pr_branches "develop"))
+
+  # 4. Check if there are branches to merge
+  if [ ${#branches[@]} -eq 0 ]; then
+    log_warning "No open PRs to merge into 'deploy/test'. Exiting." | tee -a "$LOG_FILE"
+    return 0
+  fi
+
+  # 4.a Debugging: Print the branches to be merged
+  log "Branches to merge: ${branches[@]}" | tee -a "$LOG_FILE"
+
+  # 5. Read already merged branches from log using awk
+  local merged_branches=($(awk '/Merged/ {print $NF}' "$LOG_FILE"))
+
+  # 5.a Debugging: Print already merged branches
+  log "Already merged branches: ${merged_branches[@]}" | tee -a "$LOG_FILE"
+
+  # 6. Merge each branch in chronological order
+  local merged_count=0
+  for br in "${branches[@]}"; do
+    # Skip if already merged
+    if [[ " ${merged_branches[@]} " =~ " ${br} " ]]; then
+      log "Branch '$br' already merged. Skipping." | tee -a "$LOG_FILE"
+      continue
+    fi
+
+    log "Merging branch '$br' into 'deploy/test'..." | tee -a "$LOG_FILE"
+
+    # Fetch the branch from origin
+    git fetch origin "$br" || {
+      log_error "Failed to fetch branch '$br'." | tee -a "$LOG_FILE"
+      return 1
+    }
+
+    # Check if the branch exists after fetching
+    if ! git rev-parse --verify "origin/$br" >/dev/null 2>&1; then
+      log_error "Branch 'origin/$br' does not exist after fetching." | tee -a "$LOG_FILE"
+      return 1
+    fi
+
+    # Merge the remote branch
+    if git merge --no-ff -m "Merge $br into deploy/test" "origin/$br"; then
+      log_success "Successfully merged '$br'." | tee -a "$LOG_FILE"
+      echo "[$(date)] - Merged $br" >> "$LOG_FILE"
+      merged_count=$((merged_count + 1 ))
+    else
+      log_error "Conflict merging '$br'. Please resolve conflicts, commit, and re-run recreateDeployTest." | tee -a "$LOG_FILE"
+      echo "[$(date)] - Conflict merging $br" >> "$LOG_FILE"
+      return 1
+    fi
+  done
+
+  # 7. Push deploy/test to remote
+  log "Pushing 'deploy/test' branch to remote..." | tee -a "$LOG_FILE"
+  if git push origin deploy/test --force-with-lease; then
+    log_success "Successfully pushed 'deploy/test' to remote." | tee -a "$LOG_FILE"
+  else
+    log_error "Failed to push 'deploy/test' to remote." | tee -a "$LOG_FILE"
+    return 1
+  fi
+
+  log_success "Successfully merged $merged_count branches into 'deploy/test'." | tee -a "$LOG_FILE"
+  log_success "recreateDeployTest process completed." | tee -a "$LOG_FILE"
 }
