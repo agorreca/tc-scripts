@@ -108,24 +108,31 @@ function safe_curl {
   clean_json_response "$RESPONSE"  # Clean the JSON response and return it directly
 }
 
+COLOR_BLUE="\033[1;34m"
+COLOR_YELLOW="\033[1;33m"
+COLOR_RED="\033[1;31m"
+COLOR_GREEN="\033[1;32m"
+COLOR_WHITE="\033[1;97m"
+COLOR_RESET="\033[0m"
+
 function log {
-  echo -e "\033[1;34m$1\033[0m"
+  echo -e "${COLOR_BLUE}$1${COLOR_RESET}"
 }
 
 function log_warning {
-  echo -e "\033[1;33m$1\033[0m"
+  echo -e "${COLOR_YELLOW}$1${COLOR_RESET}"
 }
 
 function log_error {
-  echo -e "\033[1;31m$1\033[0m"
+  echo -e "${COLOR_RED}$1${COLOR_RESET}"
 }
 
 function log_success {
-  echo -e "\033[1;32m$1\033[0m"
+  echo -e "${COLOR_GREEN}$1${COLOR_RESET}"
 }
 
 function log_input {
-  echo -e "\033[1;97m$1\033[0m"
+  echo -e "${COLOR_WHITE}$1${COLOR_RESET}"
 }
 
 function get_project_prefix {
@@ -161,8 +168,8 @@ function run_checks {
   done
 
   npx tsc -p ./apps/avantor-front-react/tsconfig.app.json --noEmit &&
-  nx run avantor-front-react:lint &&
-  nx format:write --all
+  nx run avantor-front-react:lint --quiet &&
+  nx format:write --all --loglevel silent
 #  &&
 #  if [ "$skip_tests" = false ]; then
 #    nx run avantor-front-react:test --silent
@@ -797,6 +804,8 @@ function createCommitAndPRs {
       git checkout "$BASE_BRANCH"
       return 1
     }
+
+    git branch --set-upstream-to=origin/deploy/test deploy/test
 
     # Drop the stash after applying to deploy/test
     git stash drop "$STASH_REF" || {
@@ -2009,115 +2018,490 @@ function fetch_open_pr_branches {
 
 function recreateDeployTest {
   local LOG_FILE="/tmp/recreate_deploy_test.log"
+  local FORCE=0  # Flag to determine if force mode is enabled
+
+  # Parse arguments
+  while [[ "$#" -gt 0 ]]; do
+    case $1 in
+      --force) FORCE=1 ;;
+      *) echo "Unknown parameter passed: $1"; return 1 ;;
+    esac
+    shift
+  done
 
   # Initialize or append to the log file with a new run header
   {
     echo "===== Recreate Deploy/Test run on $(date) ====="
+    echo "Force mode: $FORCE"
   } >> "$LOG_FILE"
 
-  # 1. Switch to 'develop' branch
-  log "Switching to 'develop' branch..." | tee -a "$LOG_FILE"
-  git checkout develop || {
-    log_error "Failed to checkout 'develop' branch." | tee -a "$LOG_FILE"
-    return 1
-  }
+  if [ "$FORCE" -eq 1 ]; then
+    log "Force mode enabled. Recreating 'deploy/test' branch..." | tee -a "$LOG_FILE"
 
-  log "Pulling latest changes from 'develop'..." | tee -a "$LOG_FILE"
-  git pull origin develop || {
-    log_error "Failed to pull from 'develop' branch." | tee -a "$LOG_FILE"
-    return 1
-  }
-
-  # 2. Handle 'deploy/test' branch
-  if git show-ref --verify --quiet "refs/heads/deploy/test"; then
-    log "Switching to existing 'deploy/test' branch..." | tee -a "$LOG_FILE"
-    git checkout deploy/test || {
-      log_error "Failed to checkout 'deploy/test' branch." | tee -a "$LOG_FILE"
+    # Switch to 'develop' branch
+    log "Switching to 'develop' branch..." | tee -a "$LOG_FILE"
+    git checkout develop || {
+      log_error "Failed to checkout 'develop' branch." | tee -a "$LOG_FILE"
       return 1
     }
 
-    log "Pulling latest changes from 'deploy/test'..." | tee -a "$LOG_FILE"
-    git pull origin deploy/test || {
-      log_error "Failed to pull from 'deploy/test' branch." | tee -a "$LOG_FILE"
+    # Pull latest changes from 'develop'
+    log "Pulling latest changes from 'develop'..." | tee -a "$LOG_FILE"
+    git pull origin develop || {
+      log_error "Failed to pull from 'develop' branch." | tee -a "$LOG_FILE"
       return 1
     }
-  else
+
+    # Delete local 'deploy/test' branch if it exists
+    if git show-ref --verify --quiet "refs/heads/deploy/test"; then
+      log "Deleting local 'deploy/test' branch..." | tee -a "$LOG_FILE"
+      git branch -D deploy/test || {
+        log_error "Failed to delete local 'deploy/test' branch." | tee -a "$LOG_FILE"
+        return 1
+      }
+    fi
+
+    # Recreate 'deploy/test' branch from 'develop'
     log "Creating 'deploy/test' branch from 'develop'..." | tee -a "$LOG_FILE"
     git checkout -b deploy/test || {
       log_error "Failed to create 'deploy/test' branch." | tee -a "$LOG_FILE"
       return 1
     }
 
+    # Fetch open PR branches against 'develop'
+    log "Fetching open PRs against 'develop' branch..." | tee -a "$LOG_FILE"
+    local branches=($(fetch_open_pr_branches "develop"))
+
+    # Check if there are branches to merge
+    if [ ${#branches[@]} -eq 0 ]; then
+      log_warning "No open PRs to merge into 'deploy/test'. Exiting." | tee -a "$LOG_FILE"
+      return 0
+    fi
+
+    # Debugging: Print the branches to be merged
+    log "Branches to merge: ${branches[@]}" | tee -a "$LOG_FILE"
+
+    # Merge each branch without skipping already merged ones
+    local merged_count=0
+    for br in "${branches[@]}"; do
+      log "Merging branch '$br' into 'deploy/test'..." | tee -a "$LOG_FILE"
+
+      # Fetch the branch from origin
+      git fetch origin "$br" || {
+        log_error "Failed to fetch branch '$br'." | tee -a "$LOG_FILE"
+        return 1
+      }
+
+      # Check if the branch exists after fetching
+      if ! git rev-parse --verify "origin/$br" >/dev/null 2>&1; then
+        log_error "Branch 'origin/$br' does not exist after fetching." | tee -a "$LOG_FILE"
+        return 1
+      fi
+
+      # Merge the remote branch
+      if git merge --no-ff -m "Merge $br into deploy/test" "origin/$br"; then
+        log_success "Successfully merged '$br'." | tee -a "$LOG_FILE"
+        echo "[$(date)] - Merged $br" >> "$LOG_FILE"
+        merged_count=$((merged_count + 1 ))
+      else
+        log_error "Conflict merging '$br'. Please resolve conflicts, commit, and re-run recreateDeployTest." | tee -a "$LOG_FILE"
+        echo "[$(date)] - Conflict merging $br" >> "$LOG_FILE"
+        return 1
+      fi
+    done
+
+    # Run TypeScript compilation check before pushing
+    log "Running TypeScript compilation check..." | tee -a "$LOG_FILE"
+    if npx tsc -p ./apps/avantor-front-react/tsconfig.app.json --noEmit; then
+      log "TypeScript compilation check passed." | tee -a "$LOG_FILE"
+    else
+      log_error "TypeScript compilation failed. Push aborted." | tee -a "$LOG_FILE"
+      return 1
+    fi
+
+    # Push 'deploy/test' to remote
     log "Pushing 'deploy/test' branch to remote..." | tee -a "$LOG_FILE"
-    git push -u origin deploy/test || {
-      log_error "Failed to push 'deploy/test' branch to remote." | tee -a "$LOG_FILE"
+    if git push origin deploy/test --force-with-lease; then
+      log_success "Successfully pushed 'deploy/test' to remote." | tee -a "$LOG_FILE"
+    else
+      log_error "Failed to push 'deploy/test' to remote." | tee -a "$LOG_FILE"
+      return 1
+    fi
+
+    log_success "Successfully merged $merged_count branches into 'deploy/test'." | tee -a "$LOG_FILE"
+    log_success "recreateDeployTest process completed in force mode." | tee -a "$LOG_FILE"
+  else
+    # Existing logic for handling 'deploy/test' branch without force
+
+    # 1. Switch to 'develop' branch
+    log "Switching to 'develop' branch..." | tee -a "$LOG_FILE"
+    git checkout develop || {
+      log_error "Failed to checkout 'develop' branch." | tee -a "$LOG_FILE"
       return 1
     }
+
+    log "Pulling latest changes from 'develop'..." | tee -a "$LOG_FILE"
+    git pull origin develop || {
+      log_error "Failed to pull from 'develop' branch." | tee -a "$LOG_FILE"
+      return 1
+    }
+
+    # 2. Handle 'deploy/test' branch
+    if git show-ref --verify --quiet "refs/heads/deploy/test"; then
+      log "Switching to existing 'deploy/test' branch..." | tee -a "$LOG_FILE"
+      git checkout deploy/test || {
+        log_error "Failed to checkout 'deploy/test' branch." | tee -a "$LOG_FILE"
+        return 1
+      }
+
+      log "Pulling latest changes from 'deploy/test'..." | tee -a "$LOG_FILE"
+      git pull origin deploy/test || {
+        log_error "Failed to pull from 'deploy/test' branch." | tee -a "$LOG_FILE"
+        return 1
+      }
+    else
+      log "Creating 'deploy/test' branch from 'develop'..." | tee -a "$LOG_FILE"
+      git checkout -b deploy/test || {
+        log_error "Failed to create 'deploy/test' branch." | tee -a "$LOG_FILE"
+        return 1
+      }
+
+      log "Pushing 'deploy/test' branch to remote..." | tee -a "$LOG_FILE"
+      git push -u origin deploy/test || {
+        log_error "Failed to push 'deploy/test' branch to remote." | tee -a "$LOG_FILE"
+        return 1
+      }
+    fi
+
+    # 3. Fetch open PR branches against 'develop'
+    log "Fetching open PRs against 'develop' branch..." | tee -a "$LOG_FILE"
+    local branches=($(fetch_open_pr_branches "develop"))
+
+    # 4. Check if there are branches to merge
+    if [ ${#branches[@]} -eq 0 ]; then
+      log_warning "No open PRs to merge into 'deploy/test'. Exiting." | tee -a "$LOG_FILE"
+      return 0
+    fi
+
+    # 4.a Debugging: Print the branches to be merged
+    log "Branches to merge: ${branches[@]}" | tee -a "$LOG_FILE"
+
+    # 5. Read already merged branches from log using awk
+    local merged_branches=($(awk '/Merged/ {print $NF}' "$LOG_FILE"))
+
+    # 5.a Debugging: Print already merged branches
+    log "Already merged branches: ${merged_branches[@]}" | tee -a "$LOG_FILE"
+
+    # 6. Merge each branch in chronological order
+    local merged_count=0
+    for br in "${branches[@]}"; do
+      # Skip if already merged
+      if [[ " ${merged_branches[@]} " =~ " ${br} " ]]; then
+        log "Branch '$br' already merged. Skipping." | tee -a "$LOG_FILE"
+        continue
+      fi
+
+      log "Merging branch '$br' into 'deploy/test'..." | tee -a "$LOG_FILE"
+
+      # Fetch the branch from origin
+      git fetch origin "$br" || {
+        log_error "Failed to fetch branch '$br'." | tee -a "$LOG_FILE"
+        return 1
+      }
+
+      # Check if the branch exists after fetching
+      if ! git rev-parse --verify "origin/$br" >/dev/null 2>&1; then
+        log_error "Branch 'origin/$br' does not exist after fetching." | tee -a "$LOG_FILE"
+        return 1
+      fi
+
+      # Merge the remote branch
+      if git merge --no-ff -m "Merge $br into deploy/test" "origin/$br"; then
+        log_success "Successfully merged '$br'." | tee -a "$LOG_FILE"
+        echo "[$(date)] - Merged $br" >> "$LOG_FILE"
+        merged_count=$((merged_count + 1 ))
+      else
+        log_error "Conflict merging '$br'. Please resolve conflicts, commit, and re-run recreateDeployTest." | tee -a "$LOG_FILE"
+        echo "[$(date)] - Conflict merging $br" >> "$LOG_FILE"
+        return 1
+      fi
+    done
+
+    # Run TypeScript compilation check before pushing
+    log "Running TypeScript compilation check..." | tee -a "$LOG_FILE"
+    if npx tsc -p ./apps/avantor-front-react/tsconfig.app.json --noEmit; then
+      log "TypeScript compilation check passed." | tee -a "$LOG_FILE"
+    else
+      log_error "TypeScript compilation failed. Push aborted." | tee -a "$LOG_FILE"
+      return 1
+    fi
+
+    # Push deploy/test to remote
+    log "Pushing 'deploy/test' branch to remote..." | tee -a "$LOG_FILE"
+    if git push origin deploy/test --force-with-lease; then
+      log_success "Successfully pushed 'deploy/test' to remote." | tee -a "$LOG_FILE"
+    else
+      log_error "Failed to push 'deploy/test' to remote." | tee -a "$LOG_FILE"
+      return 1
+    fi
+
+    log_success "Successfully merged $merged_count branches into 'deploy/test'." | tee -a "$LOG_FILE"
+    log_success "recreateDeployTest process completed." | tee -a "$LOG_FILE"
   fi
+}
 
-  # 3. Fetch open PR branches against 'develop'
-  log "Fetching open PRs against 'develop' branch..." | tee -a "$LOG_FILE"
-  local branches=($(fetch_open_pr_branches "develop"))
+function checkAllOpenPRsCompile {
+  # This function checks the TypeScript compilation of all open PR branches (targeting 'develop').
+  # It runs sequentially, storing logs under /tmp/check-compile-logs/BRANCH.log
+  # Then prints a summary and shows errors if any.
 
-  # 4. Check if there are branches to merge
-  if [ ${#branches[@]} -eq 0 ]; then
-    log_warning "No open PRs to merge into 'deploy/test'. Exiting." | tee -a "$LOG_FILE"
+  local BASE_BRANCH="develop"
+  local BRANCHES_ARRAY=($(fetch_open_pr_branches "$BASE_BRANCH"))
+  local LOGS_DIR="/tmp/check-compile-logs"
+
+  # Clean up the logs directory and create a fresh one
+  rm -rf "$LOGS_DIR"
+  mkdir -p "$LOGS_DIR"
+
+  # If no branches are found, log a warning and exit
+  if [ ${#BRANCHES_ARRAY[@]} -eq 0 ]; then
+    log_warning "No open PR branches found against '$BASE_BRANCH'."
     return 0
   fi
 
-  # 4.a Debugging: Print the branches to be merged
-  log "Branches to merge: ${branches[@]}" | tee -a "$LOG_FILE"
+  log "=== Checking TypeScript compilation for all open PR branches against '$BASE_BRANCH' ==="
 
-  # 5. Read already merged branches from log using awk
-  local merged_branches=($(awk '/Merged/ {print $NF}' "$LOG_FILE"))
+  # Checkout and update the base branch
+  git checkout "$BASE_BRANCH" &>/dev/null || { log_error "Failed to checkout '$BASE_BRANCH' branch."; return 1; }
+  git pull origin "$BASE_BRANCH" &>/dev/null || { log_error "Failed to pull latest changes for '$BASE_BRANCH'."; return 1; }
 
-  # 5.a Debugging: Print already merged branches
-  log "Already merged branches: ${merged_branches[@]}" | tee -a "$LOG_FILE"
+  for BRANCH in "${BRANCHES_ARRAY[@]}"; do
+    local SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-')
+    local CHECK_LOG="$LOGS_DIR/${SAFE_BRANCH}.log"
 
-  # 6. Merge each branch in chronological order
-  local merged_count=0
-  for br in "${branches[@]}"; do
-    # Skip if already merged
-    if [[ " ${merged_branches[@]} " =~ " ${br} " ]]; then
-      log "Branch '$br' already merged. Skipping." | tee -a "$LOG_FILE"
+    log "Running TypeScript compilation for $BRANCH..." | tee -a "$CHECK_LOG"
+
+    # Fetch the branch and log output
+    git fetch origin "$BRANCH" &>> "$CHECK_LOG" 2>&1
+    if ! git rev-parse --verify "origin/$BRANCH" > /dev/null 2>&1; then
+      echo "ERROR: Could not find remote branch 'origin/$BRANCH'." >> "$CHECK_LOG"
       continue
     fi
 
-    log "Merging branch '$br' into 'deploy/test'..." | tee -a "$LOG_FILE"
+    # Checkout the branch and update it
+    git checkout "$BRANCH" &>> "$CHECK_LOG" 2>&1
+    git pull origin "$BRANCH" &>> "$CHECK_LOG" 2>&1
 
-    # Fetch the branch from origin
-    git fetch origin "$br" || {
-      log_error "Failed to fetch branch '$br'." | tee -a "$LOG_FILE"
-      return 1
-    }
+    # Run TypeScript compilation and log output
+    npx tsc -p ./apps/avantor-front-react/tsconfig.app.json --noEmit &>> "$CHECK_LOG" 2>&1
+    local EXIT_CODE=$?
 
-    # Check if the branch exists after fetching
-    if ! git rev-parse --verify "origin/$br" >/dev/null 2>&1; then
-      log_error "Branch 'origin/$br' does not exist after fetching." | tee -a "$LOG_FILE"
-      return 1
+    # If compilation fails, log an error
+    if [ $EXIT_CODE -ne 0 ]; then
+      echo "ERROR: TypeScript compilation failed for $BRANCH" >> "$CHECK_LOG"
     fi
 
-    # Merge the remote branch
-    if git merge --no-ff -m "Merge $br into deploy/test" "origin/$br"; then
-      log_success "Successfully merged '$br'." | tee -a "$LOG_FILE"
-      echo "[$(date)] - Merged $br" >> "$LOG_FILE"
-      merged_count=$((merged_count + 1 ))
+    # Return to the base branch
+    git checkout "$BASE_BRANCH" &>/dev/null
+  done
+
+  # Summary of results
+  log "Compilation check results:"
+  for BRANCH in "${BRANCHES_ARRAY[@]}"; do
+    local SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-')
+    local CHECK_LOG="$LOGS_DIR/${SAFE_BRANCH}.log"
+
+    if [ ! -f "$CHECK_LOG" ]; then
+      echo -e "${BRANCH}: ${COLOR_RED}ERROR${COLOR_RESET} (Log not found)"
+      continue
+    fi
+
+    # Check if the log contains errors
+    if grep -q "ERROR:" "$CHECK_LOG" || grep -q "error TS" "$CHECK_LOG"; then
+      echo -e "${BRANCH}: ${COLOR_RED}ERROR${COLOR_RESET}"
     else
-      log_error "Conflict merging '$br'. Please resolve conflicts, commit, and re-run recreateDeployTest." | tee -a "$LOG_FILE"
-      echo "[$(date)] - Conflict merging $br" >> "$LOG_FILE"
-      return 1
+      echo -e "${BRANCH}: ${COLOR_GREEN}OK${COLOR_RESET}"
     fi
   done
 
-  # 7. Push deploy/test to remote
-  log "Pushing 'deploy/test' branch to remote..." | tee -a "$LOG_FILE"
-  if git push origin deploy/test --force-with-lease; then
-    log_success "Successfully pushed 'deploy/test' to remote." | tee -a "$LOG_FILE"
-  else
-    log_error "Failed to push 'deploy/test' to remote." | tee -a "$LOG_FILE"
+  echo ""
+  echo "=== Detailed errors by branch (if any) ==="
+  for BRANCH in "${BRANCHES_ARRAY[@]}"; do
+    local SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-')
+    local CHECK_LOG="$LOGS_DIR/${SAFE_BRANCH}.log"
+
+    # If there are errors in the log, display them
+    if [ -f "$CHECK_LOG" ] && ( grep -q "ERROR:" "$CHECK_LOG" || grep -q "error TS" "$CHECK_LOG" ); then
+      echo -e "${COLOR_RED}--- $BRANCH errors ---${COLOR_RESET}"
+      grep -E "ERROR:|error TS" "$CHECK_LOG"
+      echo ""
+    fi
+  done
+
+  log_success "All compilation checks have completed."
+}
+
+# Function to merge all open PR branches into develop sequentially
+function mergeAllOpenPRsToDevelop {
+  # Set the base branch to 'develop'
+  local BASE_BRANCH="develop"
+
+  # Fetch all open PR branches targeting 'develop'
+  local BRANCHES_ARRAY=($(fetch_open_pr_branches "$BASE_BRANCH"))
+
+  # Check if there are any open PR branches
+  if [ ${#BRANCHES_ARRAY[@]} -eq 0 ]; then
+    log_warning "No open PR branches found against '$BASE_BRANCH'."
+    return 0
+  fi
+
+  # Log the start of the merge process
+  log "=== Starting to merge all open PR branches into '$BASE_BRANCH' ==="
+
+  # Ensure we're on the base branch and it's up to date
+  git checkout "$BASE_BRANCH" &>/dev/null || { log_error "Failed to checkout '$BASE_BRANCH' branch."; return 1; }
+  git pull origin "$BASE_BRANCH" &>/dev/null || { log_error "Failed to pull latest changes for '$BASE_BRANCH'."; return 1; }
+
+  # Iterate through each PR branch
+  for BRANCH in "${BRANCHES_ARRAY[@]}"; do
+    # Create a safe log filename by replacing '/' with '-'
+    local SAFE_BRANCH=$(echo "$BRANCH" | tr '/' '-')
+    local MERGE_LOG="/tmp/merge-pr-logs/${SAFE_BRANCH}.log"
+
+    # Log the merge attempt
+    log "Merging branch '$BRANCH' into '$BASE_BRANCH'..." | tee -a "$MERGE_LOG"
+
+    # Checkout the PR branch
+    git checkout "$BRANCH" &>> "$MERGE_LOG" 2>&1
+    if [ $? -ne 0 ]; then
+      log_error "Failed to checkout branch '$BRANCH'. Check the log at $MERGE_LOG for details."
+      return 1
+    fi
+
+    # Pull the latest changes for the PR branch
+    git pull origin "$BRANCH" &>> "$MERGE_LOG" 2>&1
+    if [ $? -ne 0 ]; then
+      log_error "Failed to pull latest changes for branch '$BRANCH'. Check the log at $MERGE_LOG for details."
+      return 1
+    fi
+
+    # Attempt to merge 'develop' into the PR branch
+    git merge "$BASE_BRANCH" --no-ff -m "Merge '$BASE_BRANCH' into '$BRANCH'" &>> "$MERGE_LOG" 2>&1
+    local EXIT_CODE=$?
+
+    if [ $EXIT_CODE -ne 0 ]; then
+      # If merge fails, log the error and stop the process
+      log_error "Merge conflict detected when merging '$BASE_BRANCH' into '$BRANCH'."
+      log_error "Please resolve the conflicts in branch '$BRANCH'."
+      return 1
+    else
+      # If merge is successful, log the success and push the changes
+      log_success "Successfully merged '$BASE_BRANCH' into '$BRANCH'. Pushing changes..."
+      git push origin "$BRANCH" &>> "$MERGE_LOG" 2>&1
+      if [ $? -ne 0 ]; then
+        log_error "Failed to push merged changes for branch '$BRANCH'. Check the log at $MERGE_LOG for details."
+        return 1
+      fi
+      log_success "Successfully pushed merged changes for branch '$BRANCH'."
+    fi
+  done
+
+  # After all merges are successful, switch back to the base branch
+  git checkout "$BASE_BRANCH" &>/dev/null || { log_error "Failed to switch back to '$BASE_BRANCH' branch."; return 1; }
+
+  # Log the completion of the merge process
+  log_success "All open PR branches have been successfully merged into '$BASE_BRANCH'."
+}
+
+
+# Function to run any command on all open PR branches
+function runCommandOnOpenPRs() {
+  local BASE_BRANCH="develop"
+  local COMMAND="$1"
+
+  if [ -z "$COMMAND" ]; then
+    log_error "Usage: runCommandOnOpenPRs <command>"
     return 1
   fi
 
-  log_success "Successfully merged $merged_count branches into 'deploy/test'." | tee -a "$LOG_FILE"
-  log_success "recreateDeployTest process completed." | tee -a "$LOG_FILE"
+  local BRANCHES_ARRAY=($(fetch_open_pr_branches "$BASE_BRANCH"))
+  if [ ${#BRANCHES_ARRAY[@]} -eq 0 ]; then
+    log_warning "No open PR branches found against '$BASE_BRANCH'."
+    return 0
+  fi
+
+  log "Running '$COMMAND' on each open PR branch..."
+
+  # Ensure we're on the base branch
+  git checkout "$BASE_BRANCH" &>/dev/null
+  git pull origin "$BASE_BRANCH" &>/dev/null
+
+  for BRANCH in "${BRANCHES_ARRAY[@]}"; do
+    log "Checking out $BRANCH..."
+    git checkout "$BRANCH" &>/dev/null || {
+      log_error "Failed to checkout $BRANCH."
+      continue
+    }
+
+    log "Executing: $COMMAND"
+    eval "$COMMAND"
+
+    # Return to base branch
+    git checkout "$BASE_BRANCH" &>/dev/null
+  done
+
+  log_success "All done running '$COMMAND' across open PR branches."
+}
+
+# Function to run 'run_checks' on each open PR branch and push if successful
+function runChecksAndPushOnOpenPRs() {
+  local BASE_BRANCH="develop"
+  local BRANCHES_ARRAY=($(fetch_open_pr_branches "$BASE_BRANCH"))
+  if [ ${#BRANCHES_ARRAY[@]} -eq 0 ]; then
+    log_warning "No open PR branches found against '$BASE_BRANCH'."
+    return 0
+  fi
+
+  log "Running 'run_checks' and pushing changes for each open PR branch..."
+
+  # Ensure we're on the base branch
+  git checkout "$BASE_BRANCH" &>/dev/null
+  git pull origin "$BASE_BRANCH" &>/dev/null
+
+  for BRANCH in "${BRANCHES_ARRAY[@]}"; do
+    log "Checking out $BRANCH..."
+    git checkout "$BRANCH" &>/dev/null || {
+      log_error "Failed to checkout $BRANCH."
+      continue
+    }
+
+    log "Running run_checks..."
+    if run_checks; then
+      # Check if there are changes before staging or committing
+      if ! git diff --quiet; then
+        log "Staging files..."
+        git add .
+        if git diff --cached --quiet; then
+          log "No changes to commit. Skipping push for $BRANCH."
+        else
+          log "Committing changes..."
+          git commit -m ":broom: run_checks updates on $BRANCH"
+          log "Pushing $BRANCH..."
+          git push origin "$BRANCH" || {
+            log_error "Failed to push $BRANCH."
+            continue
+          }
+          log_success "Successfully ran checks and pushed for $BRANCH."
+        fi
+      else
+        log "No changes detected on $BRANCH. Skipping commit and push."
+      fi
+    else
+      log_error "run_checks failed on $BRANCH. Not pushing."
+    fi
+
+    git checkout "$BASE_BRANCH" &>/dev/null
+  done
+
+  log_success "Finished running checks and pushing changes on all open PR branches."
 }
