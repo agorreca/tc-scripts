@@ -168,12 +168,12 @@ function run_checks {
   done
 
   npx tsc -p ./apps/avantor-front-react/tsconfig.app.json --noEmit &&
-  nx run avantor-front-react:lint --quiet &&
+  nx run avantor-front-react:lint &&
   nx format:write --all --loglevel silent
-#  &&
-#  if [ "$skip_tests" = false ]; then
-#    nx run avantor-front-react:test --silent
-#  fi
+
+  if [ "$skip_tests" = false ]; then
+    nx run avantor-front-react:test --silent
+  fi
 }
 
 function diffToCommitMsg {
