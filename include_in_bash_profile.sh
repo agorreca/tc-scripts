@@ -2505,3 +2505,114 @@ function runChecksAndPushOnOpenPRs() {
 
   log_success "Finished running checks and pushing changes on all open PR branches."
 }
+
+function showOpenPRsTicketInfo() {
+  local BASE_BRANCH="develop"
+  local PRS_JSON
+
+  # Fetch the open PRs against the given base branch
+  PRS_JSON="$(get_pull_requests "$BASE_BRANCH")"
+
+  # Check if we have any open PRs
+  local PR_COUNT
+  PR_COUNT="$(echo "$PRS_JSON" | jq '. | length')"
+  if [ "$PR_COUNT" -eq 0 ]; then
+    log_warning "No open PRs found against '$BASE_BRANCH'."
+    return
+  fi
+
+  # Get Jira project prefix, e.g. "ATM-"
+  local PROJECT_PREFIX
+  PROJECT_PREFIX="$(get_project_prefix)"
+
+  # Iterate through the PRs in the JSON array
+  for (( i=0; i<PR_COUNT; i++ )); do
+    local pr
+    pr="$(echo "$PRS_JSON" | jq -cr ".[$i]")"
+
+    local PR_TITLE
+    local PR_NUMBER
+    local PR_IS_DRAFT
+
+    PR_TITLE="$(echo "$pr" | jq -r '.title // ""')"
+    PR_NUMBER="$(echo "$pr" | jq -r '.number // ""')"
+    PR_IS_DRAFT="$(echo "$pr" | jq -r '.draft // false')"  # 'true' or 'false'
+
+    # Look for something like "ATM-1234" in the PR title
+    local TICKET
+    TICKET="$(echo "$PR_TITLE" | grep -oE "${PROJECT_PREFIX}[0-9]+")"
+
+    if [ -z "$TICKET" ]; then
+      # If no ticket found, log_error and skip
+      echo ""
+      log_error "No JIRA ticket in PR title"
+
+      # If it's also a draft, highlight it
+      if [ "$PR_IS_DRAFT" = "true" ]; then
+        echo -e "${COLOR_RED}[DRAFT PR]${COLOR_RESET}"
+      fi
+
+      echo -e "${COLOR_BLUE}${PR_TITLE}${COLOR_RESET} (PR #$PR_NUMBER)"
+      echo "--------"
+      continue
+    fi
+
+    # Fetch the Jira ticket info
+    local JIRA_URL
+    JIRA_URL="$(git config --get jira.url)"
+    local API_KEY
+    API_KEY="$(git config --get jira.token)"
+    local JIRA_EMAIL
+    JIRA_EMAIL="$(git config --get jira.email)"
+
+    local RESPONSE
+    RESPONSE="$(
+      safe_curl -s \
+        -u "$JIRA_EMAIL:$API_KEY" \
+        -H "Content-Type: application/json" \
+        -X GET "$JIRA_URL/rest/api/2/issue/$TICKET"
+    )"
+
+    # Safely parse .errorMessages
+    local ERROR_MSG
+    ERROR_MSG="$(echo "$RESPONSE" | jq -r '(.errorMessages // []) | join(", ")')"
+
+    # If there's an error from Jira, log it and move on
+    if [ -n "$ERROR_MSG" ]; then
+      echo ""
+      log_error "Could not retrieve ticket $TICKET: $ERROR_MSG"
+
+      # If it's also a draft, highlight it
+      if [ "$PR_IS_DRAFT" = "true" ]; then
+        echo -e "${COLOR_RED}[DRAFT PR]${COLOR_RESET}"
+      fi
+
+      echo -e "${COLOR_BLUE}${PR_TITLE}${COLOR_RESET} (PR #$PR_NUMBER)"
+      echo "--------"
+      continue
+    fi
+
+    # Otherwise, parse the Jira ticket fields
+    local TICKET_TITLE
+    local TICKET_STATUS
+    local TICKET_ASSIGNEE
+
+    TICKET_TITLE="$(echo "$RESPONSE" | jq -r '.fields.summary // "No summary"')"
+    TICKET_STATUS="$(echo "$RESPONSE" | jq -r '.fields.status.name // "No status"')"
+    TICKET_ASSIGNEE="$(echo "$RESPONSE" | jq -r '.fields.assignee.displayName // "Unassigned"')"
+
+    # Print everything
+    echo ""
+    log_success "$TICKET: $TICKET_TITLE"
+
+    # If it's a draft, mark it prominently
+    if [ "$PR_IS_DRAFT" = "true" ]; then
+      echo -e "${COLOR_YELLOW}[DRAFT PR]${COLOR_RESET}"
+    fi
+
+    echo -e "${COLOR_BLUE}${PR_TITLE}${COLOR_RESET} (PR #$PR_NUMBER)"
+    echo -e "Status: $TICKET_STATUS"
+    echo -e "Assignee: $TICKET_ASSIGNEE"
+    echo "--------"
+  done
+}
